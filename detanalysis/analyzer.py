@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from matplotlib import pyplot as plt
 import vaex as vx
 from glob import glob
@@ -16,9 +17,16 @@ class Analyzer:
     Using vaex functions, the data is analyzed in a 
     similar way than pandas dataframe.
 
+    The analyzer works best with vaex files, however data
+    saved with pandas can still be analyzed using 
+    'load_from_pandas=True' argument. In that case, 
+    the entire dataframe is loaded to memory so works 
+    only for small samples. 
+
     """
     
-    def __init__(self, paths, series=None):
+    def __init__(self, paths, series=None,
+                 load_from_pandas=False):
         """
         Initialize analyzer class
 
@@ -47,7 +55,8 @@ class Analyzer:
         self._feature_names = None
 
         # add files and open
-        self.add_files(paths, series=series)
+        self.add_files(paths, series=series,
+                       load_from_pandas=load_from_pandas)
 
 
         
@@ -335,7 +344,7 @@ class Analyzer:
 
     
         
-    def add_files(self, paths, series=None):
+    def add_files(self, paths, series=None, load_from_pandas=False):
         """
         Function to add new files
         
@@ -375,8 +384,16 @@ class Analyzer:
 
 
         # open files
-        
-        self._df = vx.open_many(self._file_list)
+        if load_from_pandas:
+            self._df = None
+            for afile in files:
+                vaex_df = vx.from_pandas(pd.read_hdf(afile, 'detprocess_df'))
+                if  self._df is None:
+                    self._df = vaex_df
+                else:
+                    self._df = vx.concat([self._df, vaex_df])
+        else:
+            self._df = vx.open_many(self._file_list)
         
 
         # fill dataframe info
@@ -1035,6 +1052,14 @@ class Analyzer:
 
         """
 
+        
+        # check if old data
+        if 'eventnumber' in self._feature_names:
+            print('WARNING: this functionality is not '
+                  + ' compatible with data saved using'
+                  + ' pandas')
+            return
+
         # max number of traces
         max_traces = 10
         if single_plot:
@@ -1192,9 +1217,17 @@ class Analyzer:
 
    
         """
-
         
         df = None
+
+        # check if old data
+        if 'eventnumber' in self._feature_names:
+            print('WARNING: this functionality is not '
+                  + ' compatible with data saved using'
+                  + ' pandas')
+            return
+            
+            
 
         # cut
         if cut is not None:
