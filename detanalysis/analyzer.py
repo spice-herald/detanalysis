@@ -53,6 +53,7 @@ class Analyzer:
         self._nevents_nofilter = None
         self._nfeatures = None
         self._feature_names = None
+        self._load_from_pandas = load_from_pandas
 
         # add files and open
         self.add_files(paths, series=series,
@@ -270,7 +271,6 @@ class Analyzer:
             self._df.drop_filter()
             self._df = self._df.filter(cut,
                                        mode='replace')
-            
         else:
             self._df = self._df.filter(cut,
                                        mode=mode)
@@ -340,11 +340,25 @@ class Analyzer:
         """
         
         self._df.add_virtual_column(name, expression)
-    
 
+
+        
+    def clean(self):
+        """
+        Clean filter, reload data
+        """
+        if self._df is not None:
+            self._df.drop_filter() 
+
+        self.add_files(self._file_list,
+                       load_from_pandas=self._load_from_pandas,
+                       reset=True)
+        
     
         
-    def add_files(self, paths, series=None, load_from_pandas=False):
+    def add_files(self, paths, series=None,
+                  load_from_pandas=False,
+                  reset=False):
         """
         Function to add new files
         
@@ -373,7 +387,8 @@ class Analyzer:
                                      series=series)
         )
 
-        if self._file_list is None:
+    
+        if reset or self._file_list is None:
             self._file_list = files
         else:
             self._file_list.append(files)
@@ -414,7 +429,7 @@ class Analyzer:
              title=None, labels=None,
              xlabel=None, ylabel=None,
              what='count(*)',
-             ax=None, **kwargs):
+             ax=None, **kwargs): 
         """
         Display histrogram using vaex visualization
         interface (wrapper to matplotlib)
@@ -1301,11 +1316,14 @@ class Analyzer:
 
 
         """
-
-        self._feature_names = self._df.get_column_names()
-        self._nevents = self._df.shape[0]
-        self._nfeatures = self._df.shape[1]
-      
+        try:
+            self._feature_names = self._df.get_column_names()
+            self._nevents = self._df.shape[0]
+            self._nfeatures = self._df.shape[1]
+        except:
+            self.clean()
+            print('Ooops... Something went wrong. '
+                  + 'Will drop filter if any and reload data')
 
 
         
