@@ -1000,7 +1000,7 @@ class Analyzer:
             
 
         
-    def plot_traces(self, channel, path=None, cut=None,
+    def plot_traces(self, channel, raw_path, cut=None,
                     nb_random_samples=None,
                     figsize=None,
                     colors=None, colormap=None,
@@ -1016,8 +1016,10 @@ class Analyzer:
         channel : str
           name of the channel
 
-        path : str, optional
+        raw_path : str 
           base path to raw data group directory
+          Note: for old data, path needs to include group name
+                for vaex data, group_name is a feature 
 
 
         cut : str or vaex expression objects,  optional
@@ -1067,16 +1069,9 @@ class Analyzer:
 
         """
 
-        
-        # check if old data
-        if 'eventnumber' in self._feature_names:
-            print('WARNING: this functionality is not '
-                  + ' compatible with data saved using'
-                  + ' pandas')
-            return
 
         # max number of traces
-        max_traces = 10
+        max_traces = 20
         if single_plot:
             max_traces = 100
         
@@ -1084,7 +1079,7 @@ class Analyzer:
         # get traces
         traces, info = self.get_traces(
             channel,
-            path=path,
+            raw_path=raw_path,
             cut=cut,
             nb_random_samples=nb_random_samples,
             length_check=length_check,
@@ -1096,7 +1091,7 @@ class Analyzer:
 
         
         
-        nb_events = traces.shape[0]        
+        nb_events = traces.shape[0]
         nrows = math.ceil(nb_events/2)
         ncols = 2
         if  nb_events==1:
@@ -1184,10 +1179,11 @@ class Analyzer:
 
         
                     
-    def get_traces(self, channel, path=None, cut=None,
+    def get_traces(self, channel, raw_path,
+                   cut=None,
                    nb_random_samples=None,
                    length_check=True,
-                   length_limit=100):
+                   length_limit=1000):
         """
         Get raw traces for a particular channel
         and selection
@@ -1199,7 +1195,7 @@ class Analyzer:
         channel : str
           name of the channel
 
-        path : str, optional
+        raw_path : str, optional
           base path to raw data group directory
 
         cut : str or vaex expression objects,  optional
@@ -1218,7 +1214,7 @@ class Analyzer:
 
         length_limit : int 
             maximum number of traces allowed
-            default: 100
+            default: 1000
 
 
         Return
@@ -1234,15 +1230,6 @@ class Analyzer:
         """
         
         df = None
-
-        # check if old data
-        if 'eventnumber' in self._feature_names:
-            print('WARNING: this functionality is not '
-                  + ' compatible with data saved using'
-                  + ' pandas')
-            return
-            
-            
 
         # cut
         if cut is not None:
@@ -1270,18 +1257,32 @@ class Analyzer:
         
             
         # get series number
-        series_nums = df.series_number.values
-        event_nums =  df.event_number.values
-        group_names = df.group_name.values
+        series_nums = None
+        event_nums = None
+        group_names = None
+        if 'eventnumber' in self._feature_names:
+            series_nums = df.seriesnumber.values
+            event_nums =  df.eventnumber.values
+        else:
+            series_nums = df.series_number.values
+            event_nums =  df.event_number.values
+            group_names = df.group_name.values
 
+            
         # add path
         path_list = list()
-        for group in group_names:
-            path_name = path + '/' + str(group)
-            if path_name not in path_list:
-                path_list.append(path_name)
-                
-            
+        if group_names is None:
+            path_list.append(raw_path)
+        else:
+            for group in group_names:
+                group = str(group)
+                path_name = raw_path
+                if group not in raw_path:
+                    path_name = raw_path + '/' + group
+                if path_name not in path_list:
+                    path_list.append(path_name)
+
+        
         h5 = h5io.H5Reader()
         traces, info =  h5.read_many_events(
             filepath=path_list,
@@ -1291,6 +1292,8 @@ class Analyzer:
             output_format=2,
             include_metadata=True,
             adctoamp=True)
+        h5.clear()
+        
 
         
         return traces, info
