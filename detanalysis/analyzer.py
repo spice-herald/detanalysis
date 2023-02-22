@@ -6,6 +6,10 @@ from glob import glob
 import os
 import pytesdaq.io as h5io
 import math
+from pprint import pprint
+import importlib
+from inspect import getmembers, isfunction
+import git
 
 _all__ = ['Analyzer']
 
@@ -26,7 +30,9 @@ class Analyzer:
     """
     
     def __init__(self, paths, series=None,
-                 load_from_pandas=False):
+                 analysis_repo=None,
+                 load_from_pandas=False,
+                 memory_cache_size='1GB'):
         """
         Initialize analyzer class
 
@@ -34,10 +40,20 @@ class Analyzer:
         ----------
         
         paths :  str or list
-          Directory or list of directories and/or files
+          Directory/file or list of directories and/or files
 
-        series : str or list
-          series name or list of series
+        series : str or list, optional
+          filter file based on series name or list of series
+          Default: all files in "paths"
+
+        analysis_repo : str, optional
+           path to analysis package containing 
+           "cuts" and "features" directory
+           Default: None (path to cuts/features can be defined
+                    in load_cuts / load_derived_features directly)
+
+        memory_cache_size : str,optional
+           size of the RAM cache, default=1GB
        
         """
 
@@ -55,11 +71,39 @@ class Analyzer:
         self._feature_names = None
         self._load_from_pandas = load_from_pandas
 
+        # intialize cut dict
+        # {cut_name: {metadata dict}}
+        self._cuts = None
+
+        # Initialize derived features dict
+        # {feature_name: {metadata_dict}}
+        self._derived_features = None
+        
+        
         # add files and open
         self.add_files(paths, series=series,
                        load_from_pandas=load_from_pandas)
 
 
+        # turn on memory cache
+        vx.cache.memory()
+        vx.settings.cache.memory_size_limit= (
+            memory_cache_size
+        )
+
+        # FIXE implement multilevel cache
+        # vaex.settings.cache.disk_size_limit = ...
+        # vaex.cache.path = ...
+        # vaex.cache.multilevel_cache()
+        
+        
+        # analysis package directory containing "cuts", "features"
+        # directories
+        self._analysis_repo = None
+        if analysis_repo is not None:
+            self.set_analysis_repo(analysis_repo, load_func=True)
+            
+       
         
         
     @property
@@ -107,6 +151,21 @@ class Analyzer:
         print('Number of events: ' + str(self._nevents))
         print('Number of features: ' + str(self._nfeatures))
         print('Is DataFrame filtered? ' + str(self._is_df_filtered))
+
+        if self._cuts is not None:
+            print('Cuts:')
+            pprint(self._cuts)
+        else:
+            print('No cuts have been registered!')
+
+        if self._derived_features is not None:
+            print('Derived features:')
+            pprint(self._derived_features)
+        else:
+            print('No derived features have been added!')
+
+              
+            
         
 
     def get_unit(self, feature_exp):
@@ -172,7 +231,10 @@ class Analyzer:
 
 
     
-    def register_cut(self, cut, cut_name, mode='replace'):
+    def register_cut(self, cut, name,
+                     metadata=None,
+                     overwrite=False,
+                     mode='replace'):
         """
         Function to register a cut with a specific name
         Wrapper to vaex df.select()
@@ -184,28 +246,67 @@ class Analyzer:
            expression such as "x<1"
            or vaex expression object, e.g. df.x<1, 
      
-        cut_name : str
-            selection name
+        name : str
+            cut name
+
+        metadata : dict, optional
+            optional cut metadata:
+              "version" : float 
+              "authors" : str
+              "description": str  (short summary)
+              "contact" : str (format: email (name))
+              "date" : str (format: MM/DD/YYYY)
+
+        
+        overwrite : boolean, optional
+           if True, overwrite cut if exist already
+           Default: False
 
         mode : str, optional
            Possible boolean operator: replace/and/or/xor/subtract
            default: replace
         
+
+
         Return
         ------
         None
  
 
         """
+
+        # check if cut already exist
+        if (not overwrite
+            and self._cuts is not None
+            and name in self._cuts.keys()):
+            print('Cut "' + name + '" already '
+                  + 'registered! Use overwrite=True '
+                  + ' or change name.')
+            return
+
+        # metadata
+        if metadata is None:
+            metadata = dict()
         
+        # save cut name in dictionary
+        if self._cuts is None:
+            self._cuts = dict()
+                
+        # apply and register
         self._df.select(cut,
-                        name=cut_name,
+                        name=name,
                         mode=mode)
+        
+        # update dictionary
+        self._cuts[name] = metadata
 
 
         
-    def register_cut_box(self, spaces, limits,
-                         cut_name, mode='replace'):
+    def register_cut_box(self, features, limits,
+                         name,
+                         metadata=None,
+                         overwrite=False,
+                         mode='replace'):
         """
         Function to register a box with a specific name
         Wrapper to vaex df.select_box()
@@ -213,7 +314,7 @@ class Analyzer:
         Parameters
         ----------
 
-        spaces : list
+        features : list
             list of feature name or expression
             e.g ['x','y'], x,y=features
 
@@ -221,8 +322,22 @@ class Analyzer:
             sequence of shape 
             e.g. [(x1,x2), (y1,y2)]
 
-        cut_name : str
-            selection name
+        name : str
+            cut  name
+
+
+        metadata : dict, optional
+            optional cut metadata:
+              "version" : float 
+              "authors" : str
+              "description": str  (short summary)
+              "contact" : str (format: email (name))
+              "date" : str (format: MM/DD/YYYY)
+ 
+        overwrite : boolean, optional
+           if True, overwrite cut if exist already
+           Default: False
+
 
         mode : str, optional
            Possible boolean operator: replace/and/or/xor/subtract
@@ -234,12 +349,33 @@ class Analyzer:
  
 
         """
+
+        # check if cut already exist
+        if (not overwrite
+            and self._cuts is not None
+            and name in self._cuts.keys()):
+            print('Cut "' + name + '" already '
+                  + 'registered! Use mode="replace" '
+                  + ' or change name.')
+            return
+
+        # metadata
+        if metadata is None:
+            metadata = dict()
         
-        self._df.select_box(spaces, limits,
-                            name=cut_name,
+        # save cut name in dictionary
+        if self._cuts is None:
+            self._cuts = dict()
+                
+
+        # apply
+        self._df.select_box(features, limits,
+                            name=name,
                             mode=mode)
 
-
+        # update dictionary
+        self._cuts[name] = metadata
+        
         
 
     def apply_global_filter(self, cut, mode='replace'):
@@ -317,7 +453,9 @@ class Analyzer:
 
 
 
-    def add_feature(self, name, expression):
+    def add_feature(self, expression, name,
+                    metadata=None,
+                    overwrite=False):
         """
         Function to add a new feature (virtual column)
         Wrapper to vaex df.add_virtual_column()
@@ -325,12 +463,29 @@ class Analyzer:
         Parameters
         ----------
         
-        name : str
-           name of the new feature
 
         expression : str or vaex vaex expression object
             expression such as "sqrt(x**2+y**2)
             or vaex object e.g df.x+2
+
+    
+        name : str
+           name of the new feature
+
+        
+        metadata : dict, optional
+            optional feaure metadata:
+              "version" : float 
+              "authors" : str
+              "description": str  (short summary)
+              "contact" : str (format: email (name))
+              "date" : str (format: MM/DD/YYYY)
+ 
+        overwrite : boolean, optional
+           if True, overwrite derived feature if exist already
+           Default: False
+
+
 
         Return
         ------
@@ -338,10 +493,155 @@ class Analyzer:
         None
 
         """
+
+        # check if cut already exist
+        if (not overwrite
+            and self._derived_features is not None
+            and name in self._derived_features.keys()):
+            print('Feature "' + name + '" already '
+                  + 'added! Use overwrite=True '
+                  + ' or change name.')
+            return
+
+        # metadata
+        if metadata is None:
+            metadata = dict()
         
+        # save cut name in dictionary
+        if self._derived_features is None:
+            self._derived_features = dict()
+                
+        self._derived_features[name] = metadata
+
+        # add virtual column
         self._df.add_virtual_column(name, expression)
 
+        # update info
+        self._fill_df_info()
 
+
+
+        
+    def load_cuts(self,
+                  cuts_path=None,
+                  overwrite=False):
+        """
+        Load cuts from disk
+        
+        Parameters
+        ----------
+
+        cuts_path : str, option
+          path to the cuts directory or full file name(s)
+          Default: None (use analysis git repo 
+                         defined during initialization or 
+                         with "set_analysis_repo")
+
+        overwrite : boolean, optional
+           if True, overwrite cut if exist already
+           (case existing cut same/higher version)
+           If cut script has higher version, cut is 
+           automatically updated
+           Default: False
+            
+
+        Return:
+        ------
+        None
+
+        """
+
+        
+        # check path and get list of files
+        if (cuts_path is None
+            and self._analysis_repo is None):
+            print('ERROR: A path to the cuts needs '
+                  + 'to be provided!')
+            return
+
+
+        if cuts_path is None:
+            cuts_path = self._analysis_repo.working_dir + '/cuts'
+
+            # if directory not found, then walk through subdirectories
+            if not os.path.isdir(cuts_path):
+                for dir_tuple in os.walk(self._analysis_repo.working_dir):
+                    if dir_tuple and 'cuts' in dir_tuple[1]:
+                        cuts_path = dir_tuple[0]  + '/cuts'
+                        break
+            
+            
+        repo_info = self._get_repo_info()
+            
+        # get functions and load
+        self._load_func(cuts_path,
+                        is_cut=True,
+                        repo_info=repo_info,
+                        overwrite=overwrite)
+        
+        
+    def load_derived_features(self,
+                              features_path=None,
+                              overwrite=False):
+        """
+        Load derived features from disk
+        
+        Parameters
+        ----------
+
+        features_path : str, optional
+          path to the features directory or or full path file name(s)
+          Default: None (use path defined during initialization)
+
+        update_git: boolean, optional
+          update to latest git version 
+
+
+        overwrite : boolean, optional
+           if True, overwrite feature if exist already
+           (case existing feature same/higher version)
+           If feature script has higher version, it is 
+           automatically updated
+           Default: False
+            
+        
+
+        Return:
+        ------
+        None
+
+        """
+        # check path and get list of files
+        if (features_path  is None
+            and self._analysis_repo is None):
+            print('ERROR: A path to features needs '
+                  + 'to be provided!')
+            return
+        
+     
+        if features_path is None:
+            features_path = self._analysis_repo.working_dir  + '/features'
+
+            # if directory not found, then walk through subdirectories
+            if not os.path.isdir(features_path):
+                for dir_tuple in os.walk(self._analysis_repo.working_dir):
+                    if dir_tuple and 'features' in dir_tuple[1]:
+                        features_path = dir_tuple[0]  + '/features'
+                        break
+
+        # get repo info
+        repo_info = self._get_repo_info()       
+
+            
+        # get functions and load
+        self._load_func(features_path,
+                        is_cut=False,
+                        repo_info=repo_info,
+                        overwrite=overwrite)
+        
+
+
+         
         
     def clean(self):
         """
@@ -358,9 +658,11 @@ class Analyzer:
         
     def add_files(self, paths, series=None,
                   load_from_pandas=False,
-                  reset=False):
+                  replace=False):
         """
         Function to add new files
+        (Note registered cut and new feature will be 
+        deleted)
         
         Parameters
         ----------
@@ -373,6 +675,16 @@ class Analyzer:
         series : str or list of str, optional
           series name or list or series to be selected
           default: all files
+
+        load_from_pandas: boolean
+          if pandas files, set to True
+          default: False
+
+        replace: boolean
+          if True, replace existing files
+          Default: False
+
+
       
         Return
         ------
@@ -388,13 +700,19 @@ class Analyzer:
         )
 
     
-        if reset or self._file_list is None:
+        if (replace or self._file_list is None
+            or not self._file_list):
             self._file_list = files
         else:
-            self._file_list.append(files)
-            self._file_list.sort()
-            # unique
-            
+            self._file_list.extend(files)
+
+        # sort
+        self._file_list.sort()
+        
+        # unique
+        self._file_list = list(set(self._file_list))
+
+        # number of files
         self._nfiles = len(self._file_list)
 
 
@@ -637,7 +955,9 @@ class Analyzer:
             
     def heatmap(self, feature_x, feature_y, cut=None,
                 what='count(*)', f='log',
-                shape=256, limits='minmax',
+                shape=256,
+                xlimits=None, ylimits=None,
+                limits=None,
                 colormap='plasma',
                 figsize=(9,6),title=None,
                 xlabel=None, ylabel=None,
@@ -671,11 +991,23 @@ class Analyzer:
              if only an integer is given, it is used for all dimensions, 
              e.g shape=128, shape=[128, 256], default=64
 
-        limits : str or list, optional
-            description for the min and max values for the expressions, 
+        xlimits : list, optional
+            description for the X axis min and max values for the expressions, 
+             e.g. [0, 10] or 'minmax' or "99.7%" or None
+
+        ylimits : list, optional
+            description for the Y axis min and max values for the expressions, 
+             e.g. [0, 10] or 'minmax' or "99.7%" or None
+
+        limits : str or list, optional 
+            description for themin and max values for the expressions
+            (to be used instead of xlimits/ylimits, not in addition)
              e.g. "minmax" (default), "99.7%", [0, 10], or a list of, 
              e.g. [[0, 10], [0, 20], "minmax"]
-          
+             e.g  [None, [0,10]
+
+
+
         colormap : str, optional
             matplotlib colormap, default='plasma'
 
@@ -719,6 +1051,21 @@ class Analyzer:
         if ax is None:
             fig, ax = plt.subplots(figsize=figsize)
 
+
+        # limits
+        if (xlimits is not None or
+            ylimits is not None):
+
+        
+            if limits is not None:
+                print('ERROR: "limits" parameter cannot '
+                      + 'be used in the same time as '
+                      + ' "xlimits/ylimits"')
+                return
+
+            limits = [xlimits, ylimits]
+
+
         # call heatmap
         self._df.viz.heatmap(feature_x, feature_y,
                              colormap=colormap,
@@ -726,7 +1073,7 @@ class Analyzer:
                              figsize=figsize,
                              xlabel=xlabel, ylabel=ylabel,
                              selection=cut)
-
+            
         # grid
         if fig is not None:
             ax.tick_params(which="both", direction="in",
@@ -997,7 +1344,40 @@ class Analyzer:
         return self._df.widget.heatmap(feature_x,
                                        feature_y)
 
+
+    def set_analysis_repo(self, repo_path, load_func=True):
+        """
+        Set analysis github repository. It should 
+        contain  "cuts" and "features" directories
+ 
+        Parameters
+        ----------
+        repo_path : str
+          Path the repository main directory
+        
+        Return
+        ------
+        None
+
+
+        """
+
+        # instantiate repo
+        try:
+            self._analysis_repo  = git.Repo(repo_path)
+        except git.exc.GitError as e:
+            print('\nWARNING: Problem with analysis repo "'
+                  + repo_path
+                  +'".\n Is it a git package?')
             
+            
+        
+        if load_func:
+            self.load_derived_features()
+            self.load_cuts()
+
+
+    
 
         
     def plot_traces(self, channel, raw_path, cut=None,
@@ -1415,3 +1795,183 @@ class Analyzer:
         return file_list
 
     
+
+    def _load_func(self, paths,
+                   is_cut=True,
+                   repo_info=None,
+                   overwrite=False):
+        """
+        
+        import cut or feature functions
+        Parameters
+        ----------
+
+        paths :  str or list
+          Directory or list of directories and/or python scripts
+
+        is_cut : boolean, optional
+          If True, function is a cut
+          If False, function is a feature
+          Default: True
+
+
+        repo_info : dict, optional
+          dictionary with git repo information
+
+        overwrite : boolean, optional
+           if True, overwrite cut if exist already
+           (case existing cut same/higher version)
+           If cut script has higher version, cut is 
+           automatically updated
+           Default: False
+        
+        
+        Return
+        ------
+        None
+      
+        
+
+        """
+
+        # get list of python script
+        file_list = list()
+        if not isinstance(paths, list):
+            paths = [paths]
+        for filepath in paths:
+            if os.path.isdir(filepath):
+                file_list.extend(glob(filepath + '/*.py'))
+            elif os.path.isfile(filepath):
+                file_list.append(filepath)
+            else:
+                raise ValueError('ERROR: Unknown path or file '
+                                 + filepath)
+
+        
+        # sort/unique
+        file_list.sort()
+        file_list = list(set(file_list))
+        
+
+            
+        # loop files and load
+        module_name = 'detanalysis.analyzer'
+        for a_file in file_list:
+
+            # load module
+            spec = importlib.util.spec_from_file_location(module_name,
+                                                          a_file)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            # get function list
+            func_list = getmembers(module, isfunction)
+
+            # loop (multiple functions can be defined
+            # in same file)
+            for func_name in func_list:
+                func_name = func_name[0]
+           
+                # get object
+                func_obj = getattr(module, func_name)
+
+                # get object metadata
+                func_metadata = vars(func_obj)
+
+                # add repo info
+                if repo_info is not None:
+                    func_metadata.update(repo_info)
+                
+                # check if func exist
+                current_funcs = self._derived_features
+                if  is_cut:
+                    current_funcs =  self._cuts 
+                
+                if (not overwrite
+                    and current_funcs is not None
+                    and func_name in current_funcs.keys()):
+                    
+                    version = None
+                    if 'version' in func_metadata:
+                        version = func_metadata['version']
+
+                    version_saved = None
+                    if 'version' in current_funcs[func_name].keys():
+                        version_saved = (
+                            current_funcs[func_name]['version']
+                            )
+
+                    if (version is not None
+                        and version_saved is not None
+                        and float(version)<=float(version_saved)):
+
+                        print('WARNING: Function "' + func_name
+                              + '" already exist (version='
+                              + str(version_saved) + ').')
+                        print(' Unable to register it! '
+                              +'Change version or use overwrite=True')
+                        continue
+                    
+
+                # register
+                vaex_expr = func_obj(self._df)
+                if is_cut:
+                    self.register_cut(vaex_expr,
+                                      name=func_name,
+                                      metadata=func_metadata,
+                                      overwrite=True,
+                                      mode='replace')
+
+                else:
+                    self.add_feature(vaex_expr,
+                                     name=func_name,
+                                     metadata=func_metadata,
+                                     overwrite=True)
+
+        
+    def _get_repo_info(self):
+        """
+        Extract analysis repo information
+
+        Parameters
+        ----------
+        None
+
+
+        Return
+        ------
+
+        repo_info : dict
+          dictionary with git info
+        """
+
+
+        # initialize
+        repo_info = dict()
+        repo_info['git_repo_name'] = None
+        repo_info['git_repo_branch'] = None
+        repo_info['git_repo_tag']  = None
+        # check if repo exist
+        if self._analysis_repo is None:
+            print('WARNING: No git repo available. '
+                  + 'Use "set_analysis_repo" function '
+                  + 'to set it!')
+            return repo_info
+        
+
+        repo_info['git_repo_name'] = os.path.basename(
+            self._analysis_repo.working_dir
+        )
+        
+
+        repo_info['git_repo_branch'] = (
+            self._analysis_repo.git.branch('--show-current')
+        )
+
+        repo_info['git_repo_tag'] =  (
+            self._analysis_repo.git.describe(
+                '--tags', '--dirty', '--broken'
+            )
+        )
+
+        return repo_info
