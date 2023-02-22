@@ -1,0 +1,39 @@
+#################################
+#
+# Cut script example
+#
+# CPDv21Ge (rough) Chi2 cut
+#
+#################################
+
+import vaex
+import detanalysis.func as cut
+
+
+# metadata
+@cut.version(1.2)
+@cut.authors('A. Person, B. OtherPerson')
+@cut.contact('a.person@gmail.com (A. Person)')
+@cut.description('A simple chi2 cut for demo')
+@cut.date('2/21/2023')
+
+
+def cut_chi2_CPDv21Ge(df):
+    """
+    Rough OF chi2 cut 
+
+    comment here
+
+    """
+
+    # straight line cut below amp=0.9e-5
+    cut = ((df.lowchi2_of1x1_constrained_CPDv21Ge<5e6)
+           & (df.amp_of1x1_constrained_CPDv21Ge<0.9e-5))
+    
+    
+    # keep everything above it
+    cut = cut | (df.amp_of1x1_constrained_CPDv21Ge>=0.9e-5)
+
+
+    return cut
+           
