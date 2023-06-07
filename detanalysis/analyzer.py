@@ -1557,66 +1557,30 @@ class Analyzer:
 
         return fig, ax
 
-        
-                    
-    def get_traces(self, channel, raw_path,
-                   cut=None,
-                   nb_random_samples=None,
-                   length_check=True,
-                   length_limit=1000):
+
+
+
+    
+    def get_event_list(self, cut=None,
+                       nb_random_samples=None,
+                       nb_events_check=True,
+                       nb_events_limit=1000):
+
         """
-        Get raw traces for a particular channel
-        and selection
-
-
-        Parameters
-        ----------
-        
-        channel : str
-          name of the channel
-
-        raw_path : str, optional
-          base path to raw data group directory
-
-        cut : str or vaex expression objects,  optional
-            selection to be used
-            e.g  cut=df.x<2 or cut='mycut'
-            default: None
-
-        nb_random_samples : int, optional
-          number of randomly selected events (after cut)
-          default: use all events
-        
-        length_check : boolean, option
-           if True, check that number traces <length_limit
-           if False, no checks, 
-           default: True
-
-        length_limit : int 
-            maximum number of traces allowed
-            default: 1000
-
-
-        Return
-        ------
-
-        traces :  3D numpy array
-           traces [nb events, nb_channels, nb samples] in amps
-
-        info : dict
-            metadata associated to traces
-
-   
+        Get list of events in the form  of a list 
+        of dictionaries with metadata required to 
+        find traces in raw data
         """
-        
+
+
         df = None
-
+        
         # cut
         if cut is not None:
             df = self._df.filter(cut)
         else:
             df = self._df
-
+            
         if df.shape[0]==0:
             print('WARNING: No events found!')
             return None, None
@@ -1629,52 +1593,148 @@ class Analyzer:
         # number of events check
         nb_events = df.shape[0]
 
-        if length_check and nb_events>length_limit:
-            raise ValueError('ERROR: Number of traces limited to '
-                             + str(length_limit) + '. Found '
+        if nb_events_check and nb_events>nb_events_limit:
+            raise ValueError('ERROR: Number of events limited to '
+                             + str(nb_events_limit) + '. Found '
                              + str(nb_events) + ' traces!'
-                             + ' Use length_check=False to disable error.')
-        
-            
-        # get series number
+                             + ' Use nb_events_check=False to disable error.')
+
+
+        # get events metadata
         series_nums = None
         event_nums = None
         group_names = None
+        trigger_indices = None
+        
         if 'eventnumber' in self._feature_names:
             series_nums = df.seriesnumber.values
             event_nums =  df.eventnumber.values
         else:
             series_nums = df.series_number.values
             event_nums =  df.event_number.values
-            group_names = df.group_name.values
+            if 'group_name' in  self._feature_names:
+                group_names = df.group_name.values
+            if 'trigger_index' in self._feature_names:
+                trigger_indices = df.trigger_index.values
+
+        event_list = list()
+        for ievent in range(nb_events):
+            event_dict = dict()
+            if series_nums is not None:
+                event_dict['series_number'] = series_nums[ievent]
+            if event_nums is not None:
+                event_dict['event_number'] = event_nums[ievent]
+            if group_names is not None:
+                event_dict['group_name'] = group_names[ievent]
+            if trigger_indices in not None:
+                event_dict['trigger_index'] = trigger_indices[ievent]
+               
+            event_list.append(event_dict)
+
+
+        # display
+        print('INFO: Number of events found = '
+              + str(len(event_list)))
+        
 
             
-        # add path
-        path_list = list()
-        if group_names is None:
-            path_list.append(raw_path)
-        else:
-            for group in group_names:
-                group = str(group)
-                path_name = raw_path
-                if group not in raw_path:
-                    path_name = raw_path + '/' + group
-                if path_name not in path_list:
-                    path_list.append(path_name)
+        return event_list
 
+
+    
+                    
+    def get_traces(self, channels, raw_path,
+                   trace_length_msec=None,
+                   trace_length_samples=None
+                   pretrigger_length_msec=None,
+                   pretrigger_length_samples=None,
+                   cut=None,
+                   nb_random_samples=None,
+                   nb_events_check=True,
+                   nb_events_limit=1000):
+        """
+        Get raw traces for a particular channel
+        and selection
+
+
+        Parameters
+        ----------
         
+        channels : str or list of str
+          name of the channel(s)
+
+        raw_path : str
+          base path to data group directory
+
+        trace_length_msec : float, optional
+           trace length in milli seconds
+ 
+        trace_length_samples : int, optional
+           trace length in number of samples
+        
+        pretrigger_length_msec : float, optional
+           pretrigger length in milli seconds
+ 
+        pretrigger_length_samples : int, optional
+           pretrigger length in number of samples
+        
+        cut : str or vaex expression objects,  optional
+            selection to be used
+            e.g  cut=df.x<2 or cut='mycut'
+            default: None
+
+        nb_random_samples : int, optional
+          number of randomly selected events (after cut)
+          default: use all events
+        
+        nb_events_check : boolean, option
+           if True, check that number traces <lentgh_limit
+           if False, no checks, 
+           default: True
+
+        nb_events_limit : int 
+            maximum number of traces allowed
+            default: 1000
+
+
+        Return
+        ------
+
+        traces :  3D numpy array depending 
+           raw traces in amps dim=[nb events, nb_channels, nb samples]
+
+        info : dict
+            metadata associated to traces
+   
+        """
+
+
+        # get list of events
+        event_list = self.get_event_list(cut=cut,
+                                         nb_random_samples=nb_random_samples,
+                                         nb_events_check=nb_events_check,
+                                         nb_events_limit=nb_events_limit):
+
+
+        # get raw data
         h5 = h5io.H5Reader()
+
         traces, info =  h5.read_many_events(
-            filepath=path_list,
-            detector_chans=channel,
-            event_nums=event_nums,
-            series_nums=series_nums,
+            filepath=raw_path,
+            detector_chans=channels,
+            event_list=event_list,
+            trace_length_msec=trace_length_msec,
+            trace_length_samples=trace_length_samples,
+            pretrigger_length_msec=pretrigger_length_msec,
+            pretrigger_length_samples=pretrigger_length_samples,
             output_format=2,
             include_metadata=True,
             adctoamp=True)
+        
         h5.clear()
         
 
+        
         
         return traces, info
 
