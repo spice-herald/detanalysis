@@ -128,6 +128,13 @@ class Semiautocut:
                 -val_upper/val_lower: value above and/or below which to 
                 pass data.
                 -time_arr: array of time pairs between which to pass data.
+                -time_arr_num/time_arr_percent/time_arr_sigma: a tuple of
+                three numbers: [(the number/percent/sigma of events in a
+                certain range above which to cut all events in a time bin),
+                (the lower value for the range to count events within),
+                (the upper value for the range to count events within)].
+                Primarily used for cutting periods of high noise using
+                the psd_amp RQ.
             Example: {'sigma': 0.90}, or 
             {'pecent_upper': 0.65, 'percent_lower': 0.05} or
             {'time_arr': [[1050, 1075], [1502, 1760]]}
@@ -294,8 +301,12 @@ class Semiautocut:
             self._do_simple_cut(lgcdiagnostics=lgcdiagnostics,
                                 include_previous_cuts=include_previous_cuts)
         elif self.time_bins_arr is not None:
-            self._do_time_binned_cut(lgcdiagnostics=lgcdiagnostics,
-                                     include_previous_cuts=include_previous_cuts)
+            if any([x in self.cut_pars for x in ['time_arr_num', 'time_arr_percent', 'time_arr_sigma']]):
+                self._do_time_binned_count_cut(lgcdiagnostics=lgcdiagnostics,
+                                               include_previous_cuts=include_previous_cuts)
+            else:
+                self._do_time_binned_cut(lgcdiagnostics=lgcdiagnostics,
+                                        include_previous_cuts=include_previous_cuts)
         elif self.ofamp_bins_arr is not None:
             self._do_ofamp_binned_cut(lgcdiagnostics=lgcdiagnostics,
                                       include_previous_cuts=include_previous_cuts)
@@ -641,6 +652,130 @@ class Semiautocut:
         working_mask = working_mask | current_mask
         
         self.mask = working_mask
+        
+    def _do_time_binned_count_cut(self, lgcdiagnostics=False, include_previous_cuts=False):
+        """
+        Takes time binned cut (i.e divide the data up into a number of time bins), and 
+        based on the count of events within a certain range of the RQ being cut on (e.g.
+        baseline between val_lower and val_upper) decides whether or not to cut the entire
+        time bin. Can decide to cut based on either a number of events above which to cut,
+        the percentile of events over which to cut, or the sigma value of events over which
+        to cut.
+        
+        Parameters
+        ----------
+        
+        lgcdiagnostics : bool, optional
+            Prints diagnostic statements
+            
+        include_previous_cuts : bool or array, optional
+            Option to generate the automatic cut values from events that pass
+            previous rounds of cuts (i.e. cutting in ofamp vs. chi2 space, 
+            generating cut levels only from the distributiuon of events that
+            pass baseline and slope cuts). If True, uses all RQs in the dataframe
+            starting with 'cut_' and including the channel name. If an array of
+            names, uses those cut RQ names.
+        """
+        
+        #array of what bins to cut, starts as passing all events
+        bin_cut_arr = np.ones(len(self.time_bins_arr), dtype='bool')
+        
+        #array of number of events per bin, starts off as zeros
+        bin_num_arr = np.zeros(len(self.time_bins_arr))
+        
+        if "time_arr_num" in self.cut_pars:
+            val_lower = self.cut_pars["time_arr_num"][1]
+            val_upper = self.cut_pars["time_arr_num"][2]
+        elif "time_arr_percent" in self.cut_pars:
+            val_lower = self.cut_pars["time_arr_percent"][1]
+            val_upper = self.cut_pars["time_arr_percent"][2]
+        elif "time_arr_sigma" in self.cut_pars:
+            val_lower = self.cut_pars["time_arr_sigma"][1]
+            val_upper = self.cut_pars["time_arr_sigma"][2]
+            
+        if lgcdiagnostics:
+            print("Lower value: " + str(val_lower))
+            print("Upper value: " + str(val_upper))
+            
+        self.value_lower_arr = np.ones(len(self.time_bins_arr)) * val_lower
+        self.value_upper_arr = np.ones(len(self.time_bins_arr)) * val_upper
+        
+        i = 0
+        while i < len(self.time_bins_arr):
+            #make temporary time bins array with extra last bin for edge of
+            #last bin
+            time_bins_arr_ = self.time_bins_arr.tolist()
+            time_bins_arr_.append(max(self.df.event_time.values))
+            
+            #reset selection 
+            self.df['_trues'] = np.ones(len(self.df), dtype = 'bool')
+            self.df.select('_trues', mode='replace')
+            
+            #time selection
+            self.df.select(self.df.event_time > time_bins_arr_[i], mode='and')
+            self.df.select(self.df.event_time < time_bins_arr_[i + 1], mode='and')
+            
+            #values selection
+            self.df.select(self.df[self.cut_rq] > val_lower, mode='and')
+            self.df.select(self.df[self.cut_rq] < val_upper, mode='and')
+            
+            #number of events in selection
+            num_events_in_bin = self.df.selected_length()
+            bin_num_arr[i] = num_events_in_bin
+            
+            #reset selection 
+            self.df['_trues'] = np.ones(len(self.df), dtype = 'bool')
+            self.df.select('_trues', mode='replace')
+            
+            i += 1
+        
+        if lgcdiagnostics:
+            print("Number of events per time bin in set region: " + str(bin_num_arr))
+        
+        if "time_arr_num" in self.cut_pars:
+            cut_num = self.cut_pars['time_arr_num'][0]
+        elif "time_arr_percent" in self.cut_pars:
+            percent_to_cut = self.cut_pars['time_arr_percent'][0] * 100
+            cut_num = np.percentile(bin_num_arr, percent_to_cut)
+        elif "time_arr_sigma" in self.cut_pars:
+            sigma_to_cut = self.cut_pars['time_arr_sigma'][0]
+            median = np.percentile(bin_num_arr, 50)
+            sigma = np.mean([np.percentile(bin_num_arr, 50 - 68.27/2.0) - median, 
+                            median - np.percentile(bin_num_arr, 50 + 68.27/2.0)])
+            sigma = np.abs(sigma)
+            cut_num = median + sigma_to_cut * sigma
+           
+        if lgcdiagnostics:
+            print("Cut number (cut bins with more events than this): " + str(cut_num))
+           
+        i = 0
+        while i < len(self.time_bins_arr):
+            if bin_num_arr[i] > cut_num:
+                bin_cut_arr[i] = True
+            else:
+                bin_cut_arr[i] = False
+            i += 1
+            
+        working_mask = np.ones(len(self.df), dtype='bool')
+        event_times_arr = self.df.event_time.values
+        #make temporary time bins array with extra last bin for edge of
+        #last bin
+        time_bins_arr_ = self.time_bins_arr.tolist()
+        time_bins_arr_.append(max(self.df.event_time.values))
+            
+        i = 0
+        while i < len(event_times_arr):
+            j = 0
+            while j < len(self.time_bins_arr):
+                if (event_times_arr[i] > time_bins_arr_[j]) and (event_times_arr[i] < time_bins_arr_[j + 1]):
+                    if bin_cut_arr[j]:
+                        working_mask[i] = False
+                j += 1
+            i += 1
+            
+        self.mask = working_mask
+            
+        
             
     def _do_ofamp_binned_cut(self, lgcdiagnostics=False, include_previous_cuts=False):
         """
@@ -807,8 +942,8 @@ class Semiautocut:
         if lgchours:
             plt.xlabel("event_time (hours)")
         else:
-            plt.xlabel("event_time (seconds)")
-            
+            plt.xlabel("event_time (seconds)")    
+        
         #plot horizontal lines for cut limits                   
         i = 0
         while i < len(self.value_lower_arr):
@@ -1493,3 +1628,61 @@ class MasterSemiautocuts:
                            
         plt.title("All Cuts, OFAmp vs. Event Time")
         plt.show()
+        
+    def get_example_events(self, num_example_events, trace_index, path_to_triggered_data,
+                           lgcdiagnostics=False):
+        """
+        Returns a set number of traces that pass cuts, for e.g. comparison to autocuts.
+        
+        Parameters
+        ----------
+        
+        num_example_events : int
+            Number of example events to return
+            
+        trace_index : int
+            Index of the trace to plot
+            
+        path_to_triggered_data : str
+            Path to the folder holding triggered data
+            
+        lgcdiagnostics : bool, optional
+            If True, prints our diagnostic statements
+            
+        Returns
+        -------
+        
+        traces_passing : array
+            Array of the traces passing all the cuts
+        """
+        
+        self.df.select(str('cut_all_' + self.channel_name))
+        all_pass_indices = self.df.evaluate('index', selection = True)
+        pass_indicies = np.random.choice(all_pass_indices, num_example_events)
+        
+        all_indices = self.df.evaluate('index')
+        pass_mask = np.isin(all_indices, all_pass_indices)
+        fail_mask = np.invert(pass_mask)
+        
+        #turn off selections
+        self.df.select('_trues')
+        
+        
+        if lgcdiagnostics:
+            print("Passing indices: " + str(pass_indicies))
+            
+            
+        traces_passing = []
+        
+        i = 0
+        while i < len(pass_indicies):
+            traces_passing.append(get_trace(self.df, pass_indicies[i], path_to_triggered_data,
+                                  lgcdiagnostics=lgcdiagnostics)[trace_index])
+            if lgcdiagnostics:
+                if i%10 == 0:
+                    print("Got event " + str(i))
+            i += 1
+            
+            
+        return np.asarray(traces_passing)
+        
