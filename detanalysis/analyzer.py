@@ -1626,7 +1626,7 @@ class Analyzer:
                 event_dict['event_number'] = event_nums[ievent]
             if group_names is not None:
                 event_dict['group_name'] = group_names[ievent]
-            if trigger_indices in not None:
+            if trigger_indices is not None:
                 event_dict['trigger_index'] = trigger_indices[ievent]
                
             event_list.append(event_dict)
@@ -1645,7 +1645,7 @@ class Analyzer:
                     
     def get_traces(self, channels, raw_path,
                    trace_length_msec=None,
-                   trace_length_samples=None
+                   trace_length_samples=None,
                    pretrigger_length_msec=None,
                    pretrigger_length_samples=None,
                    cut=None,
@@ -1713,7 +1713,7 @@ class Analyzer:
         event_list = self.get_event_list(cut=cut,
                                          nb_random_samples=nb_random_samples,
                                          nb_events_check=nb_events_check,
-                                         nb_events_limit=nb_events_limit):
+                                         nb_events_limit=nb_events_limit)
 
 
         # get raw data
