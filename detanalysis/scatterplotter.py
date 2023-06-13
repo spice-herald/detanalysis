@@ -108,6 +108,7 @@ class ScatterPlotter:
 
         """
         #df.select(df.index == index)
+        print("Index: " + str(index))
 
         dump_number = int(self.df[self.df.index == index].dump_number.values[0])
         series_number = int(self.df[self.df.index == index].series_number.values[0])

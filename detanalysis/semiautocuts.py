@@ -40,6 +40,9 @@ def get_trace(df, index, path_to_triggered_data, lgcdiagnostics):
     """
     #df.select(df.index == index)
     
+    df['index'] = np.arange(0, len(df), 1)
+    df = df.sort(by='index')
+    
     dump_number = int(df[df.index == index].dump_number.values[0])
     series_number = int(df[df.index == index].series_number.values[0])
     event_index = int(df[df.index == index].event_index.values[0])
