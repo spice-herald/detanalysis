@@ -10,6 +10,8 @@ from pprint import pprint
 import importlib
 from inspect import getmembers, isfunction
 import git
+import qetpy as qp
+
 
 _all__ = ['Analyzer']
 
@@ -1377,15 +1379,21 @@ class Analyzer:
             self.load_cuts()
 
 
-    
 
-        
-    def plot_traces(self, channel, raw_path, cut=None,
+    def plot_traces(self, channels, raw_path,
+                    cut=None,
+                    trace_length_msec=None,
+                    trace_length_samples=None,
+                    pretrigger_length_msec=None,
+                    pretrigger_length_samples=None,
                     nb_random_samples=None,
                     figsize=None,
                     colors=None, colormap=None,
-                    length_check=True,
-                    single_plot=False):
+                    nb_events_check=True,
+                    single_plot=False,
+                    baselinesub=True,
+                    baselineinds=(5,100),
+                    lpcutoff=None):
         """
         Display selected traces for a particular channel
         and selection
@@ -1393,8 +1401,8 @@ class Analyzer:
         Parameters
         ----------
 
-        channel : str
-          name of the channel
+        channels : str or list of str
+          name of the channel (s)
 
         raw_path : str 
           base path to raw data group directory
@@ -1413,7 +1421,8 @@ class Analyzer:
             number of traces)
  
         colors : str or list, optional
-           color or list of colors. if list, it should be same length as nb traces
+           color or list of colors. if list, it should be same length as 
+           nb traces for multiple traces or nb_channels for multiple channels
            Default: blue for multiple plots, use colormap for single plot
             
         colormap : str, optional
@@ -1430,12 +1439,18 @@ class Analyzer:
           number of randomly selected events (before cut)
           default: use all events
         
-        length_check : boolean, option
+        nb_events_check : boolean, option
            
            if True, check that number traces <20 when
            multiple subplots, <100 same plot
            if False, no checks, 
            default: True
+
+        baselinesub : boolean, optional
+           if True: baseline subtract trace using 
+           first 100 bins
+        
+
 
         Return
         -------
@@ -1454,59 +1469,110 @@ class Analyzer:
         max_traces = 20
         if single_plot:
             max_traces = 100
-        
+
+            
+        # convert channels into list
+        if isinstance(channels, str):
+            channels = [channels]
+
+
+        #if (len(channels)>1 and
+        #    (len(single_plot):
+        #    print('WARNING: Unable to plot multiple channels for '
+        #          + ' multiple events on single figure. Changing '
+        #          + 'settings to display multiple plots!')
+        #    single_plot = False
+
             
         # get traces
         traces, info = self.get_traces(
-            channel,
+            channels,
+            trace_length_msec=trace_length_msec,
+            trace_length_samples=trace_length_samples,
+            pretrigger_length_msec=pretrigger_length_msec,
+            pretrigger_length_samples=pretrigger_length_samples,
             raw_path=raw_path,
             cut=cut,
             nb_random_samples=nb_random_samples,
-            length_check=length_check,
-            length_limit= max_traces
+            nb_events_check=nb_events_check,
+            nb_events_limit=max_traces,
+            baselinesub=baselinesub
         )
 
         if traces is None:
             return None, None
 
-        
-        
+        # event info
         nb_events = traces.shape[0]
+        nb_channels = traces.shape[1]
+        nb_bins = traces.shape[2]
         nrows = math.ceil(nb_events/2)
         ncols = 2
         if  nb_events==1:
             nb_cols = 1
             
-        dt = 1/info[0]['sample_rate']
+        # sample rate
+        fs = info[0]['sample_rate']
+        dt = 1/fs
 
-
+        # low pass filter
+        if lpcutoff is not None:
+            for ichan in range(nb_channels):
+                traces[:,ichan,:] = qp.utils.lowpassfilter(
+                    traces[:,ichan,:],
+                    lpcutoff,
+                    fs=fs)
             
+        # check if single plot can be used
+        if (single_plot 
+            and nb_channels>1 and nb_events>1):
+            print('WARNING: Unable to plot multiple channels for '
+                  + ' multiple events on single figure. Changing '
+                  + 'settings to display multiple plots!')
+            single_plot = False
+            
+                  
         # colors
         if colors is not None:
             
             if not isinstance(colors, list):
                 colors = [colors]
-                if not single_plot:
-                    colors = colors*nb_events
-                
-            if len(colors) != nb_events:
+                colors = colors*nb_events
+
+            if nb_channels>1:
+                if len(colors)<nb_channels:
+                    raise ValueError('ERROR: "colors" argument should be '
+                                     + 'a list of  length '
+                                     + str(nb_channels) + '!')
+            elif len(colors)<nb_events:
                 raise ValueError('ERROR: "colors" argument should be '
                                  + 'a list of  length '
-                                 + str(nb_events) + '!')     
+                                 + str(nb_events) + '!')            
         else:
+
+            # hard code a few colors
             colors = ['blue','red','green',
                       'cyan','magenta','yellow']
 
-            if not single_plot:
+            # for multiple plots, just use blue
+            if nb_channels==1 and not single_plot:
                 colors = ['blue']*nb_events
-            
-            if nb_events>len(colors) or colormap is not None:
+
+            # nb colors
+            nb_colors = nb_events
+            if nb_channels>nb_colors:
+                nb_colors = nb_channels
+                
+            # check if using color map
+            if (colormap is not None
+                or (len(colors)<nb_channels
+                    or len(colors)<nb_events)):
+                
                 if colormap is None:
-                    colormap = 'plasma'
+                    colormap = 'plasma'   
                 colors = plt.cm.get_cmap(colormap)(
-                    np.linspace(0.1, 0.9, nb_events))
-            else: 
-                colors = colors[0:nb_events]
+                    np.linspace(0.1, 0.9, nb_colors))
+                
 
             
             
@@ -1535,26 +1601,29 @@ class Analyzer:
                                    ncols=ncols,
                                    figsize=figsize)
             
-        bins = np.asarray(list(range(traces.shape[-1])))*dt/1000
+        bins = np.asarray(list(range(traces.shape[-1])))*dt*1000
 
         if not single_plot:
             ax = ax.ravel()
 
-        for it in range(traces.shape[0]):
-
+        for it in range(nb_events):
             ax_it = ax
             if not single_plot:
                 ax_it = ax[it] 
-            
-            ax_it.plot(bins, traces[it,0,:]*1e6,
-                        color=colors[it])
+            for ichan in range(nb_channels):
+                chan_name = channels[ichan]
+                it_color = it
+                if nb_channels>1:
+                    it_color = ichan
+                
+                ax_it.plot(bins, traces[it,ichan,:]*1e6,
+                           color=colors[it_color],
+                           label=chan_name)
+            ax_it.legend()
             ax_it.set_xlabel("Time [ms]")
             ax_it.set_ylabel("Amplitude [uA]")
 
-        # add title
-        plt.suptitle(channel + ' raw traces')
-
-
+       
         return fig, ax
 
 
@@ -1651,7 +1720,9 @@ class Analyzer:
                    cut=None,
                    nb_random_samples=None,
                    nb_events_check=True,
-                   nb_events_limit=1000):
+                   nb_events_limit=1000,
+                   baselinesub=True,
+                   baselineinds=(5,100)):
         """
         Get raw traces for a particular channel
         and selection
@@ -1710,11 +1781,13 @@ class Analyzer:
 
 
         # get list of events
-        event_list = self.get_event_list(cut=cut,
-                                         nb_random_samples=nb_random_samples,
-                                         nb_events_check=nb_events_check,
-                                         nb_events_limit=nb_events_limit)
-
+        event_list = self.get_event_list(
+            cut=cut,
+            nb_random_samples=nb_random_samples,
+            nb_events_check=nb_events_check,
+            nb_events_limit=nb_events_limit
+        )
+        
 
         # get raw data
         h5 = h5io.H5Reader()
@@ -1729,7 +1802,10 @@ class Analyzer:
             pretrigger_length_samples=pretrigger_length_samples,
             output_format=2,
             include_metadata=True,
-            adctoamp=True)
+            adctoamp=True,
+            baselinesub=baselinesub,
+            baselineinds=baselineinds
+        )
         
         h5.clear()
         
