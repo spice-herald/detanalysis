@@ -132,7 +132,7 @@ class ScatterPlotter:
             
         # trigger index
         trigger_index = None
-        if 'trigger_index' in self.df.get_column_names():
+        if 'trigger_index' in column_list:
             trigger_index = int(
                 self.df[self.df.index==df_index].trigger_index.values[0]
             )
@@ -141,8 +141,8 @@ class ScatterPlotter:
         # file name
         series_name = h5io.extract_series_name(series_number)
         file_list = glob(self.path_to_data +'/*_' + series_name
-                           + '_F' + str(dump_number).zfill(4)
-                           + '.hdf5')
+                         + '_F' + str(dump_number).zfill(4)
+                         + '.hdf5')
         if len(file_list) != 1:
             raise ValueError('ERROR: No raw data found')
         file_name = file_list[0]
