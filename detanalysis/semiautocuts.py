@@ -19,7 +19,8 @@ __all__ = ['Semiautocut', 'MasterSemiautocut', 'get_trace']
 
 h5 = h5io.H5Reader()
 
-def get_trace(df, index, path_to_triggered_data, lgcdiagnostics):
+def get_trace(df, index, path_to_data, lgcdiagnostics=False, 
+              trace_length_msec=10, pretrigger_length_msec=5):
     """
     Function to retrive a trace so it can be plotted
     
@@ -32,43 +33,69 @@ def get_trace(df, index, path_to_triggered_data, lgcdiagnostics):
     index : int
         The index (in the vaex dataframe) of the trace being retrived
         
-    path_to_triggered_data : str
-        The path to the folder where the triggered data is stored. 
+    path_to_data : str
+        The path to the folder where the data is stored, e.g.
+        /sdata1/runs/run28/
         
     lgcdiagnostics : bool, optional
         If True, prints out diagnostic statements
+        
+    trace_length_msec : float, optional
+        Total trace length, passed to read_many_events
+        
+    pretrigger_length_msec : float, optional
+        Pretrigger length, passed to read_many_events
     """
     #df.select(df.index == index)
     
     df['index'] = np.arange(0, len(df), 1)
     df = df.sort(by='index')
     
+    group_name = df[df.index == index].group_name.values[0]
+    event_number = df[df.index == index].event_number.values[0]
+    series_number = df[df.index == index].series_number.values[0]
     dump_number = int(df[df.index == index].dump_number.values[0])
-    series_number = int(df[df.index == index].series_number.values[0])
-    event_index = int(df[df.index == index].event_index.values[0])
+    #series_number = int(df[df.index == index].series_number.values[0])
+    #event_index = int(df[df.index == index].event_index.values[0])
     
-    if df[df.index == index].trigger_type.values == 4.0:
-        random_truth = False
-    if df[df.index == index].trigger_type.values == 3.0:
-        random_truth = True
+    #if df[df.index == index].trigger_type.values == 4.0:
+    #    random_truth = False
+    #if df[df.index == index].trigger_type.values == 3.0:
+    #    random_truth = True
         
     if lgcdiagnostics:
-        print("dump_number: " + str(dump_number))
+        print("group_name: " + str(group_name))
+        print("event_number: " + str(event_number))
         print("series_number: " + str(series_number))
-        print("event_index: " + str(event_index))
-        print("random_truth: " + str(random_truth))
+        print("dump_number: " + str(dump_number))
+        #print("series_number: " + str(series_number))
+        #print("event_index: " + str(event_index))
+        #print("random_truth: " + str(random_truth))
     
-    if bool(random_truth):
-        event_prefix = '/rand_I2_D'
-    else:
-        event_prefix = '/threshtrig_I2_D'
+    #if bool(random_truth):
+    #    event_prefix = '/rand_I2_D'
+    #else:
+    #    event_prefix = '/threshtrig_I2_D'
     
-    file_name = path_to_triggered_data + event_prefix + str(series_number)[1:-6]  + "_T" + str(series_number)[-6:] + "_F" + str(dump_number).zfill(4) + ".hdf5"
+    #file_name = path_to_triggered_data + event_prefix + str(series_number)[1:-6]  + "_T" + str(series_number)[-6:] + "_F" + str(dump_number).zfill(4) + ".hdf5"
     
-    if lgcdiagnostics:
-        print("File name: " + str(file_name))
+    event_list_ = {'series_number': series_number, 
+                    'event_number': event_number, 
+                    'group_name': group_name
+                    }
+                    
+    event_nums_ = [int(dump_number * 100000 + event_number)]
+    series_nums_ = [int(series_number)]
+                    
+    trace = h5.read_many_events(filepath=path_to_data, nevents=1, event_nums=event_nums_,
+                                series_nums=series_nums_, 
+                                trace_length_msec=trace_length_msec, 
+                                pretrigger_length_msec=pretrigger_length_msec)
     
-    trace = h5.read_single_event(event_index = event_index, file_name = file_name, adctoamp = True)
+    #if lgcdiagnostics:
+    #    print("File name: " + str(file_name))
+    
+    #trace = h5.read_single_event(event_index = event_index, file_name = file_name, adctoamp = True)
     return np.asarray(trace)
     
 
@@ -926,15 +953,20 @@ class Semiautocut:
         plt.show()
         
         #plot zoomed in around cuts
+        center_val_y = 0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr))
+        delta_y = max(self.value_upper_arr) - min(self.value_lower_arr)
+        
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap((self.df.event_time)/time_norm, self.df[self.cut_rq], colormap = cmap,
+                            limits=['minmax', [center_val_y - delta_y, center_val_y + delta_y]], 
                             f='log', colorbar_label = "log(number/bin), All Events")
                             
         cmap = copy(mpl.cm.get_cmap('spring') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap((self.df.event_time)/time_norm, self.df[self.cut_rq], colormap = cmap,
                             f='log', selection=cut_names,
+                            limits=['minmax', [center_val_y - delta_y, center_val_y + delta_y]], 
                              colorbar_label = "log(number/bin), Passing Cuts")
                            
         plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + " vs. Time \n " + 
@@ -957,8 +989,6 @@ class Semiautocut:
                             min(self.df.event_time.values)/time_norm, max(self.df.event_time.values)/time_norm)
             i += 1
             
-        center_val_y = 0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr))
-        delta_y = max(self.value_upper_arr) - min(self.value_lower_arr)
         plt.ylim(center_val_y - delta_y, center_val_y + delta_y)
             
         plt.show()
@@ -1036,22 +1066,61 @@ class Semiautocut:
         
         
         #plot zoomed in around cuts
+        center_val_y = 0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr))
+        delta_y = max(self.value_upper_arr) - min(self.value_lower_arr)
+        
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.cut_rq], colormap = cmap,
+                            limits=['minmax', [center_val_y - delta_y, center_val_y + delta_y]], 
                             f='log', colorbar_label = "log(number/bin), All Events")
                             
         cmap = copy(mpl.cm.get_cmap('spring') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.cut_rq], colormap = cmap,
+                            limits=['minmax', [center_val_y - delta_y, center_val_y + delta_y]], 
                             f='log', selection=cut_names,
                             colorbar_label = "log(number/bin), Passing Cuts")
                            
         plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + 
                   " vs. " + str(self.ofamp_rq) + " \n Zoomed In")
             
+        plt.ylim(center_val_y - delta_y, center_val_y + delta_y)
+        
+        #plot horizontal lines for cut limits                   
+        i = 0
+        while i < len(self.value_lower_arr):
+            if self.ofamp_bins_arr is not None:
+                ofamp_limits_arr = np.asarray(self.ofamp_bins_arr).tolist()
+                ofamp_limits_arr.append(max(self.df[self.ofamp_rq].values))
+                plt.hlines([self.value_lower_arr[i], self.value_upper_arr[i]],
+                            ofamp_limits_arr[i], ofamp_limits_arr[i + 1])
+            i += 1
+            
+        plt.show()
+        
+        #plot zoomed in around cuts and 10% to 90% of OFAmp
         center_val_y = 0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr))
         delta_y = max(self.value_upper_arr) - min(self.value_lower_arr)
+        tenpc_ofamp = np.percentile(self.df[self.ofamp_rq].values, 1)
+        nintypc_ofamp = np.percentile(self.df[self.ofamp_rq].values, 99)
+        
+        cmap = copy(mpl.cm.get_cmap('winter') )
+        cmap.set_bad(alpha = 0.0, color = 'Black')
+        self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.cut_rq], colormap = cmap,
+                            limits=[[tenpc_ofamp, nintypc_ofamp], [center_val_y - delta_y, center_val_y + delta_y]], 
+                            f='log', colorbar_label = "log(number/bin), All Events")
+                            
+        cmap = copy(mpl.cm.get_cmap('spring') )
+        cmap.set_bad(alpha = 0.0, color = 'Black')
+        self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.cut_rq], colormap = cmap,
+                            limits=[[tenpc_ofamp, nintypc_ofamp], [center_val_y - delta_y, center_val_y + delta_y]], 
+                            f='log', selection=cut_names,
+                            colorbar_label = "log(number/bin), Passing Cuts")
+                           
+        plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + 
+                  " vs. " + str(self.ofamp_rq) + " \n Zoomed In, 1% to 99% OFAmp")
+            
         plt.ylim(center_val_y - delta_y, center_val_y + delta_y)
         
         #plot horizontal lines for cut limits                   
@@ -1185,6 +1254,25 @@ class Semiautocut:
         self.df.viz.histogram(self.cut_rq, label = "All Events", shape=num_bins)
         
         self.df.viz.histogram(self.cut_rq, label = "Passing Cut/s", selection=cut_names, shape=num_bins)
+        plt.yscale('log')
+        plt.legend()
+        plt.grid()
+        plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + " Histogram")
+        plt.show()
+        
+        #plot zoomed events
+        center_val_y = 0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr))
+        delta_y = max(self.value_upper_arr) - min(self.value_lower_arr)
+        
+        #reset selection 
+        self.df['_trues'] = np.ones(len(self.df), dtype='bool')
+        self.df.select('_trues', mode='replace')
+        
+        self.df.viz.histogram(self.cut_rq, label = "All Events", shape=num_bins, 
+                                limits=[center_val_y - delta_y, center_val_y + delta_y])
+        
+        self.df.viz.histogram(self.cut_rq, label = "Passing Cut/s", selection=cut_names, shape=num_bins,
+                                limits=[center_val_y - delta_y, center_val_y + delta_y])
         plt.yscale('log')
         plt.legend()
         plt.grid()
