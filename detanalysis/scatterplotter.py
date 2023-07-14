@@ -197,14 +197,20 @@ class ScatterPlotter:
         
         vals1 = self.df[self.rq_1].values
         vals2 = self.df[self.rq_2].values
-        if self.selection is not None:
-            vals1 = self.df[self.selection][self.rq_1].values
-            vals2 = self.df[self.selection][self.rq_2].values
-            
         ax.scatter(vals1,
                     vals2, 
                     s = 3, picker = True, pickradius = 5,
                     )
+        
+        if self.selection is not None:
+            vals1 = self.df[self.selection][self.rq_1].values
+            vals2 = self.df[self.selection][self.rq_2].values
+            
+            ax.scatter(vals1,
+                        vals2, 
+                        s = 3, color = 'C1', label = "Selected Events"
+                        )
+            ax.legend()
         ax.set_xlabel(self.label_1)
         ax.set_ylabel(self.label_2)
         
