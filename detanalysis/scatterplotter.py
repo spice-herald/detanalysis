@@ -26,7 +26,8 @@ class ScatterPlotter:
     
     def __init__(self, df, path_to_data, rq_1, rq_2,
                  label_1, label_2, title=None, 
-                 trace_inds_to_plot=None, trace_inds_labels=None):
+                 trace_inds_to_plot=None, trace_inds_labels=None,
+                 selection=None):
         """
         Initialize the ScatterPlotter class.
         
@@ -71,6 +72,9 @@ class ScatterPlotter:
             Array of the labels for the traces that are plotted, e.g.
             ['Melange1pc1ch', 'Melange25pcRight']. If None, the traces
             are not labeled
+            
+        selection : vaex selection string, optional
+            Vaex selection string for the displayed data.
         """
         self.df = df
         self.path_to_data = path_to_data
@@ -86,6 +90,8 @@ class ScatterPlotter:
         
         self.trace_inds_to_plot = trace_inds_to_plot
         self.trace_inds_labels = trace_inds_labels
+        
+        self.selection = selection
         
     def _onpick(self, event):
         """
@@ -188,9 +194,17 @@ class ScatterPlotter:
     def plot_picking_scatter(self):
         mpl.rcParams['figure.figsize'] = [8, 5.5]
         fig, ax = plt.subplots()
-        ax.scatter(self.df[self.rq_1].values,
-                    self.df[self.rq_2].values, 
-                    s = 3, picker = True, pickradius = 5)
+        
+        vals1 = self.df[self.rq_1].values
+        vals2 = self.df[self.rq_2].values
+        if self.selection is not None:
+            vals1 = self.df[self.selection][self.rq_1].values
+            vals2 = self.df[self.selection][self.rq_2].values
+            
+        ax.scatter(vals1,
+                    vals2, 
+                    s = 3, picker = True, pickradius = 5,
+                    )
         ax.set_xlabel(self.label_1)
         ax.set_ylabel(self.label_2)
         
@@ -211,9 +225,16 @@ class ScatterPlotter:
             fig, axs = plt.subplots(2)
             fig.subplots_adjust(hspace=0.5)
             
-            axs[0].scatter(self.df[self.rq_1].values,
-                       self.df[self.rq_2].values,
-                      label = "All Data", s = 5)
+            vals1 = self.df[self.rq_1].values
+            vals2 = self.df[self.rq_2].values
+            if self.selection is not None:
+                vals1 = self.df[self.selection][self.rq_1].values
+                vals2 = self.df[self.selection][self.rq_2].values
+            
+            axs[0].scatter(vals1,
+                        vals2, 
+                        s = 3, picker = True, pickradius = 5,
+                        )
             
             axs[0].scatter(self.df[self.rq_1].values[self.picked_inds[i]],
                        self.df[self.rq_2].values[self.picked_inds[i]],
