@@ -53,7 +53,7 @@ setup(
         'numpy',
         'matplotlib',
         'astropy',
-        'pytesdaq>=0.3.0',
+        'pytesdaq>=0.3.3',
         'vaex',
     ],
 )

@@ -741,7 +741,7 @@ class Semiautocut:
             cut_names = copy(include_previous_cuts)
         else:
             cut_names = []
-        cut_names.append("cut_" + str(self.cut_rq))
+        cut_names.append(str(self.cut_name))
         if lgcdiagnostics:
             print("Cut names to include in with cuts plot: ")
             print(str(cut_names))
@@ -857,7 +857,7 @@ class Semiautocut:
             cut_names = copy(include_previous_cuts)
         else:
             cut_names = []
-        cut_names.append("cut_" + str(self.cut_rq))
+        cut_names.append(str(self.cut_name))
         if lgcdiagnostics:
             print("Cut names to include in with cuts plot: ")
             print(str(cut_names))
@@ -960,7 +960,7 @@ class Semiautocut:
             cut_names = copy(include_previous_cuts)
         else:
             cut_names = []
-        cut_names.append("cut_" + str(self.cut_rq))
+        cut_names.append(str(self.cut_name))
         if lgcdiagnostics:
             print("Cut names to include in with cuts plot: ")
             print(str(cut_names))
@@ -1035,7 +1035,7 @@ class Semiautocut:
             cut_names = copy(include_previous_cuts)
         else:
             cut_names = []
-        cut_names.append("cut_" + str(self.cut_rq))
+        cut_names.append(str(self.cut_name))
         if lgcdiagnostics:
             print("Cut names to include in with cuts plot: ")
             print(str(cut_names))
