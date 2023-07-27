@@ -226,9 +226,13 @@ class Analyzer:
 
         """
 
-        return self._df.evaluate(feature_exp,
-                                 selection=cut,
-                                 **kwargs)
+        values = np.array(
+            self._df.evaluate(feature_exp,
+                              selection=cut,
+                              **kwargs)
+        )
+        
+        return values
     
 
 
@@ -729,6 +733,9 @@ class Analyzer:
                     self._df = vx.concat([self._df, vaex_df])
         else:
             self._df = vx.open_many(self._file_list)
+
+        # add "index" to match pandas dataframe
+        self._df['index'] = np.arange(0, len(self._df), 1)
         
 
         # fill dataframe info
@@ -1259,7 +1266,7 @@ class Analyzer:
 
 
         # dataframe
-        df = self._df
+        df = self._df.copy()
         if nb_random_samples is not None:
             df = df.sample(n=nb_random_samples)
 
@@ -1496,7 +1503,8 @@ class Analyzer:
             nb_random_samples=nb_random_samples,
             nb_events_check=nb_events_check,
             nb_events_limit=max_traces,
-            baselinesub=baselinesub
+            baselinesub=baselinesub,
+            baselineinds=baselineinds,
         )
 
         if traces is None:
@@ -1648,7 +1656,7 @@ class Analyzer:
         if cut is not None:
             df = self._df.filter(cut)
         else:
-            df = self._df
+            df = self._df.copy()
             
         if df.shape[0]==0:
             print('WARNING: No events found!')
@@ -1721,7 +1729,7 @@ class Analyzer:
                    nb_random_samples=None,
                    nb_events_check=True,
                    nb_events_limit=1000,
-                   baselinesub=True,
+                   baselinesub=False,
                    baselineinds=(5,100)):
         """
         Get raw traces for a particular channel
