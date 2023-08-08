@@ -113,9 +113,11 @@ class ScatterPlotter:
             The index (in the vaex dataframe) of the trace being retrived
 
         """
+
         
         # instantiate h5reader
         h5 = h5io.H5Reader()
+
 
         # get list of columns
         column_list = self.df.get_column_names()

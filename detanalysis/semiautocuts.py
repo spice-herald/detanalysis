@@ -19,7 +19,8 @@ __all__ = ['Semiautocut', 'MasterSemiautocut', 'get_trace']
 
 h5 = h5io.H5Reader()
 
-def get_trace(df, index, path_to_triggered_data, lgcdiagnostics):
+def get_trace(df, index, path_to_data, lgcdiagnostics=False, 
+              trace_length_msec=10, pretrigger_length_msec=5):
     """
     Function to retrive a trace so it can be plotted
     
@@ -32,40 +33,69 @@ def get_trace(df, index, path_to_triggered_data, lgcdiagnostics):
     index : int
         The index (in the vaex dataframe) of the trace being retrived
         
-    path_to_triggered_data : str
-        The path to the folder where the triggered data is stored. 
+    path_to_data : str
+        The path to the folder where the data is stored, e.g.
+        /sdata1/runs/run28/
         
     lgcdiagnostics : bool, optional
         If True, prints out diagnostic statements
+        
+    trace_length_msec : float, optional
+        Total trace length, passed to read_many_events
+        
+    pretrigger_length_msec : float, optional
+        Pretrigger length, passed to read_many_events
     """
     #df.select(df.index == index)
     
-    dump_number = int(df[df.index == index].dump_number.values[0])
-    series_number = int(df[df.index == index].series_number.values[0])
-    event_index = int(df[df.index == index].event_index.values[0])
+    df['index'] = np.arange(0, len(df), 1)
+    df = df.sort(by='index')
     
-    if df[df.index == index].trigger_type.values == 4.0:
-        random_truth = False
-    if df[df.index == index].trigger_type.values == 3.0:
-        random_truth = True
+    group_name = df[df.index == index].group_name.values[0]
+    event_number = df[df.index == index].event_number.values[0]
+    series_number = df[df.index == index].series_number.values[0]
+    dump_number = int(df[df.index == index].dump_number.values[0])
+    #series_number = int(df[df.index == index].series_number.values[0])
+    #event_index = int(df[df.index == index].event_index.values[0])
+    
+    #if df[df.index == index].trigger_type.values == 4.0:
+    #    random_truth = False
+    #if df[df.index == index].trigger_type.values == 3.0:
+    #    random_truth = True
         
     if lgcdiagnostics:
-        print("dump_number: " + str(dump_number))
+        print("group_name: " + str(group_name))
+        print("event_number: " + str(event_number))
         print("series_number: " + str(series_number))
-        print("event_index: " + str(event_index))
-        print("random_truth: " + str(random_truth))
+        print("dump_number: " + str(dump_number))
+        #print("series_number: " + str(series_number))
+        #print("event_index: " + str(event_index))
+        #print("random_truth: " + str(random_truth))
     
-    if bool(random_truth):
-        event_prefix = '/rand_I2_D'
-    else:
-        event_prefix = '/threshtrig_I2_D'
+    #if bool(random_truth):
+    #    event_prefix = '/rand_I2_D'
+    #else:
+    #    event_prefix = '/threshtrig_I2_D'
     
-    file_name = path_to_triggered_data + event_prefix + str(series_number)[1:-6]  + "_T" + str(series_number)[-6:] + "_F" + str(dump_number).zfill(4) + ".hdf5"
+    #file_name = path_to_triggered_data + event_prefix + str(series_number)[1:-6]  + "_T" + str(series_number)[-6:] + "_F" + str(dump_number).zfill(4) + ".hdf5"
     
-    if lgcdiagnostics:
-        print("File name: " + str(file_name))
+    event_list_ = {'series_number': series_number, 
+                    'event_number': event_number, 
+                    'group_name': group_name
+                    }
+                    
+    event_nums_ = [int(dump_number * 100000 + event_number)]
+    series_nums_ = [int(series_number)]
+                    
+    trace = h5.read_many_events(filepath=path_to_data, nevents=1, event_nums=event_nums_,
+                                series_nums=series_nums_, 
+                                trace_length_msec=trace_length_msec, 
+                                pretrigger_length_msec=pretrigger_length_msec)
     
-    trace = h5.read_single_event(event_index = event_index, file_name = file_name, adctoamp = True)
+    #if lgcdiagnostics:
+    #    print("File name: " + str(file_name))
+    
+    #trace = h5.read_single_event(event_index = event_index, file_name = file_name, adctoamp = True)
     return np.asarray(trace)
     
 
@@ -125,6 +155,13 @@ class Semiautocut:
                 -val_upper/val_lower: value above and/or below which to 
                 pass data.
                 -time_arr: array of time pairs between which to pass data.
+                -time_arr_num/time_arr_percent/time_arr_sigma: a tuple of
+                three numbers: [(the number/percent/sigma of events in a
+                certain range above which to cut all events in a time bin),
+                (the lower value for the range to count events within),
+                (the upper value for the range to count events within)].
+                Primarily used for cutting periods of high noise using
+                the psd_amp RQ.
             Example: {'sigma': 0.90}, or 
             {'pecent_upper': 0.65, 'percent_lower': 0.05} or
             {'time_arr': [[1050, 1075], [1502, 1760]]}
@@ -291,8 +328,12 @@ class Semiautocut:
             self._do_simple_cut(lgcdiagnostics=lgcdiagnostics,
                                 include_previous_cuts=include_previous_cuts)
         elif self.time_bins_arr is not None:
-            self._do_time_binned_cut(lgcdiagnostics=lgcdiagnostics,
-                                     include_previous_cuts=include_previous_cuts)
+            if any([x in self.cut_pars for x in ['time_arr_num', 'time_arr_percent', 'time_arr_sigma']]):
+                self._do_time_binned_count_cut(lgcdiagnostics=lgcdiagnostics,
+                                               include_previous_cuts=include_previous_cuts)
+            else:
+                self._do_time_binned_cut(lgcdiagnostics=lgcdiagnostics,
+                                        include_previous_cuts=include_previous_cuts)
         elif self.ofamp_bins_arr is not None:
             self._do_ofamp_binned_cut(lgcdiagnostics=lgcdiagnostics,
                                       include_previous_cuts=include_previous_cuts)
@@ -638,6 +679,130 @@ class Semiautocut:
         working_mask = working_mask | current_mask
         
         self.mask = working_mask
+        
+    def _do_time_binned_count_cut(self, lgcdiagnostics=False, include_previous_cuts=False):
+        """
+        Takes time binned cut (i.e divide the data up into a number of time bins), and 
+        based on the count of events within a certain range of the RQ being cut on (e.g.
+        baseline between val_lower and val_upper) decides whether or not to cut the entire
+        time bin. Can decide to cut based on either a number of events above which to cut,
+        the percentile of events over which to cut, or the sigma value of events over which
+        to cut.
+        
+        Parameters
+        ----------
+        
+        lgcdiagnostics : bool, optional
+            Prints diagnostic statements
+            
+        include_previous_cuts : bool or array, optional
+            Option to generate the automatic cut values from events that pass
+            previous rounds of cuts (i.e. cutting in ofamp vs. chi2 space, 
+            generating cut levels only from the distributiuon of events that
+            pass baseline and slope cuts). If True, uses all RQs in the dataframe
+            starting with 'cut_' and including the channel name. If an array of
+            names, uses those cut RQ names.
+        """
+        
+        #array of what bins to cut, starts as passing all events
+        bin_cut_arr = np.ones(len(self.time_bins_arr), dtype='bool')
+        
+        #array of number of events per bin, starts off as zeros
+        bin_num_arr = np.zeros(len(self.time_bins_arr))
+        
+        if "time_arr_num" in self.cut_pars:
+            val_lower = self.cut_pars["time_arr_num"][1]
+            val_upper = self.cut_pars["time_arr_num"][2]
+        elif "time_arr_percent" in self.cut_pars:
+            val_lower = self.cut_pars["time_arr_percent"][1]
+            val_upper = self.cut_pars["time_arr_percent"][2]
+        elif "time_arr_sigma" in self.cut_pars:
+            val_lower = self.cut_pars["time_arr_sigma"][1]
+            val_upper = self.cut_pars["time_arr_sigma"][2]
+            
+        if lgcdiagnostics:
+            print("Lower value: " + str(val_lower))
+            print("Upper value: " + str(val_upper))
+            
+        self.value_lower_arr = np.ones(len(self.time_bins_arr)) * val_lower
+        self.value_upper_arr = np.ones(len(self.time_bins_arr)) * val_upper
+        
+        i = 0
+        while i < len(self.time_bins_arr):
+            #make temporary time bins array with extra last bin for edge of
+            #last bin
+            time_bins_arr_ = self.time_bins_arr.tolist()
+            time_bins_arr_.append(max(self.df.event_time.values))
+            
+            #reset selection 
+            self.df['_trues'] = np.ones(len(self.df), dtype = 'bool')
+            self.df.select('_trues', mode='replace')
+            
+            #time selection
+            self.df.select(self.df.event_time > time_bins_arr_[i], mode='and')
+            self.df.select(self.df.event_time < time_bins_arr_[i + 1], mode='and')
+            
+            #values selection
+            self.df.select(self.df[self.cut_rq] > val_lower, mode='and')
+            self.df.select(self.df[self.cut_rq] < val_upper, mode='and')
+            
+            #number of events in selection
+            num_events_in_bin = self.df.selected_length()
+            bin_num_arr[i] = num_events_in_bin
+            
+            #reset selection 
+            self.df['_trues'] = np.ones(len(self.df), dtype = 'bool')
+            self.df.select('_trues', mode='replace')
+            
+            i += 1
+        
+        if lgcdiagnostics:
+            print("Number of events per time bin in set region: " + str(bin_num_arr))
+        
+        if "time_arr_num" in self.cut_pars:
+            cut_num = self.cut_pars['time_arr_num'][0]
+        elif "time_arr_percent" in self.cut_pars:
+            percent_to_cut = self.cut_pars['time_arr_percent'][0] * 100
+            cut_num = np.percentile(bin_num_arr, percent_to_cut)
+        elif "time_arr_sigma" in self.cut_pars:
+            sigma_to_cut = self.cut_pars['time_arr_sigma'][0]
+            median = np.percentile(bin_num_arr, 50)
+            sigma = np.mean([np.percentile(bin_num_arr, 50 - 68.27/2.0) - median, 
+                            median - np.percentile(bin_num_arr, 50 + 68.27/2.0)])
+            sigma = np.abs(sigma)
+            cut_num = median + sigma_to_cut * sigma
+           
+        if lgcdiagnostics:
+            print("Cut number (cut bins with more events than this): " + str(cut_num))
+           
+        i = 0
+        while i < len(self.time_bins_arr):
+            if bin_num_arr[i] > cut_num:
+                bin_cut_arr[i] = True
+            else:
+                bin_cut_arr[i] = False
+            i += 1
+            
+        working_mask = np.ones(len(self.df), dtype='bool')
+        event_times_arr = self.df.event_time.values
+        #make temporary time bins array with extra last bin for edge of
+        #last bin
+        time_bins_arr_ = self.time_bins_arr.tolist()
+        time_bins_arr_.append(max(self.df.event_time.values))
+            
+        i = 0
+        while i < len(event_times_arr):
+            j = 0
+            while j < len(self.time_bins_arr):
+                if (event_times_arr[i] > time_bins_arr_[j]) and (event_times_arr[i] < time_bins_arr_[j + 1]):
+                    if bin_cut_arr[j]:
+                        working_mask[i] = False
+                j += 1
+            i += 1
+            
+        self.mask = working_mask
+            
+        
             
     def _do_ofamp_binned_cut(self, lgcdiagnostics=False, include_previous_cuts=False):
         """
@@ -741,6 +906,7 @@ class Semiautocut:
             cut_names = copy(include_previous_cuts)
         else:
             cut_names = []
+            
         cut_names.append(str(self.cut_name))
         if lgcdiagnostics:
             print("Cut names to include in with cuts plot: ")
@@ -788,15 +954,20 @@ class Semiautocut:
         plt.show()
         
         #plot zoomed in around cuts
+        center_val_y = 0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr))
+        delta_y = max(self.value_upper_arr) - min(self.value_lower_arr)
+        
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap((self.df.event_time)/time_norm, self.df[self.cut_rq], colormap = cmap,
+                            limits=['minmax', [center_val_y - delta_y, center_val_y + delta_y]], 
                             f='log', colorbar_label = "log(number/bin), All Events")
                             
         cmap = copy(mpl.cm.get_cmap('spring') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap((self.df.event_time)/time_norm, self.df[self.cut_rq], colormap = cmap,
                             f='log', selection=cut_names,
+                            limits=['minmax', [center_val_y - delta_y, center_val_y + delta_y]], 
                              colorbar_label = "log(number/bin), Passing Cuts")
                            
         plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + " vs. Time \n " + 
@@ -804,8 +975,8 @@ class Semiautocut:
         if lgchours:
             plt.xlabel("event_time (hours)")
         else:
-            plt.xlabel("event_time (seconds)")
-            
+            plt.xlabel("event_time (seconds)")    
+        
         #plot horizontal lines for cut limits                   
         i = 0
         while i < len(self.value_lower_arr):
@@ -819,8 +990,6 @@ class Semiautocut:
                             min(self.df.event_time.values)/time_norm, max(self.df.event_time.values)/time_norm)
             i += 1
             
-        center_val_y = 0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr))
-        delta_y = max(self.value_upper_arr) - min(self.value_lower_arr)
         plt.ylim(center_val_y - delta_y, center_val_y + delta_y)
             
         plt.show()
@@ -898,22 +1067,61 @@ class Semiautocut:
         
         
         #plot zoomed in around cuts
+        center_val_y = 0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr))
+        delta_y = max(self.value_upper_arr) - min(self.value_lower_arr)
+        
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.cut_rq], colormap = cmap,
+                            limits=['minmax', [center_val_y - delta_y, center_val_y + delta_y]], 
                             f='log', colorbar_label = "log(number/bin), All Events")
                             
         cmap = copy(mpl.cm.get_cmap('spring') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.cut_rq], colormap = cmap,
+                            limits=['minmax', [center_val_y - delta_y, center_val_y + delta_y]], 
                             f='log', selection=cut_names,
                             colorbar_label = "log(number/bin), Passing Cuts")
                            
         plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + 
                   " vs. " + str(self.ofamp_rq) + " \n Zoomed In")
             
+        plt.ylim(center_val_y - delta_y, center_val_y + delta_y)
+        
+        #plot horizontal lines for cut limits                   
+        i = 0
+        while i < len(self.value_lower_arr):
+            if self.ofamp_bins_arr is not None:
+                ofamp_limits_arr = np.asarray(self.ofamp_bins_arr).tolist()
+                ofamp_limits_arr.append(max(self.df[self.ofamp_rq].values))
+                plt.hlines([self.value_lower_arr[i], self.value_upper_arr[i]],
+                            ofamp_limits_arr[i], ofamp_limits_arr[i + 1])
+            i += 1
+            
+        plt.show()
+        
+        #plot zoomed in around cuts and 10% to 90% of OFAmp
         center_val_y = 0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr))
         delta_y = max(self.value_upper_arr) - min(self.value_lower_arr)
+        tenpc_ofamp = np.percentile(self.df[self.ofamp_rq].values, 1)
+        nintypc_ofamp = np.percentile(self.df[self.ofamp_rq].values, 99)
+        
+        cmap = copy(mpl.cm.get_cmap('winter') )
+        cmap.set_bad(alpha = 0.0, color = 'Black')
+        self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.cut_rq], colormap = cmap,
+                            limits=[[tenpc_ofamp, nintypc_ofamp], [center_val_y - delta_y, center_val_y + delta_y]], 
+                            f='log', colorbar_label = "log(number/bin), All Events")
+                            
+        cmap = copy(mpl.cm.get_cmap('spring') )
+        cmap.set_bad(alpha = 0.0, color = 'Black')
+        self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.cut_rq], colormap = cmap,
+                            limits=[[tenpc_ofamp, nintypc_ofamp], [center_val_y - delta_y, center_val_y + delta_y]], 
+                            f='log', selection=cut_names,
+                            colorbar_label = "log(number/bin), Passing Cuts")
+                           
+        plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + 
+                  " vs. " + str(self.ofamp_rq) + " \n Zoomed In, 1% to 99% OFAmp")
+            
         plt.ylim(center_val_y - delta_y, center_val_y + delta_y)
         
         #plot horizontal lines for cut limits                   
@@ -1047,6 +1255,25 @@ class Semiautocut:
         self.df.viz.histogram(self.cut_rq, label = "All Events", shape=num_bins)
         
         self.df.viz.histogram(self.cut_rq, label = "Passing Cut/s", selection=cut_names, shape=num_bins)
+        plt.yscale('log')
+        plt.legend()
+        plt.grid()
+        plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + " Histogram")
+        plt.show()
+        
+        #plot zoomed events
+        center_val_y = 0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr))
+        delta_y = max(self.value_upper_arr) - min(self.value_lower_arr)
+        
+        #reset selection 
+        self.df['_trues'] = np.ones(len(self.df), dtype='bool')
+        self.df.select('_trues', mode='replace')
+        
+        self.df.viz.histogram(self.cut_rq, label = "All Events", shape=num_bins, 
+                                limits=[center_val_y - delta_y, center_val_y + delta_y])
+        
+        self.df.viz.histogram(self.cut_rq, label = "Passing Cut/s", selection=cut_names, shape=num_bins,
+                                limits=[center_val_y - delta_y, center_val_y + delta_y])
         plt.yscale('log')
         plt.legend()
         plt.grid()
@@ -1245,7 +1472,7 @@ class MasterSemiautocuts:
         else:
             self.chi2_rq = str('lowchi2_of1x1_nodelay_' + self.channel_name)
         
-    def combine_cuts(self, sat_pass_threshold=None):
+    def combine_cuts(self, sat_pass_threshold=None, cut_name=None):
         """
         Combines the cuts specified during initializtion
         into one.
@@ -1257,8 +1484,14 @@ class MasterSemiautocuts:
             If not none, this is the value above which all
             events will be passed. Used for saturated events,
             which will fail the slope and possibly chi2 cuts.
+            
+            
+        cut_name : string, optional
+            If not none, this is the name of the cut created.
         
         """
+        
+        self.cut_name = cut_name
         
         cuts_all_arr = np.ones(len(self.df), dtype = 'bool')
         
@@ -1274,11 +1507,14 @@ class MasterSemiautocuts:
             ofamp_thresh_mask = (ofamps_arr_all > sat_pass_threshold)
             
             cuts_all_arr = np.logical_or(cuts_all_arr, ofamp_thresh_mask)
+        
+        if cut_name is None:
+            self.cut_name = 'cut_all_' + self.channel_name
+        self.df[self.cut_name] = cuts_all_arr
             
-        self.df['cut_all_' + self.channel_name] = cuts_all_arr
         self.mask = cuts_all_arr
     
-    def get_passage_fraction(self, lgcprint=False):
+    def get_passage_fraction(self, lgcprint=False, lgc_randoms_return=False):
         """
         Calculates and returns the passage fraction for the cut.
         
@@ -1289,6 +1525,10 @@ class MasterSemiautocuts:
             If True, prints a diagostic message including the
             passage fraction and number of passing, failing and
             total events.
+            
+        lgc_randoms_retur : bool, optional
+            If True, returns the randoms passage fraction rather
+            than the total passage fraction.
                 
         Returns
         -------
@@ -1299,14 +1539,28 @@ class MasterSemiautocuts:
         """
             
         passage_fraction = sum(self.mask)/len(self.mask)
+        
+        randoms_mask = self.df[self.df['trigger_type'] == 3.0][self.cut_name].values
+        
+        num_randoms = len(randoms_mask)
+        passed_events_randoms = sum(randoms_mask)
+        passage_fraction_randoms = passed_events_randoms/num_randoms
             
         if lgcprint:
             print("Passage fraction: " + str(passage_fraction))
             print("Number of events passing cuts: " + str(sum(self.mask)))
             print("Number of events failing cuts: " + str(len(self.mask) - sum(self.mask)))
             print("Number of total events: " + str(len(self.mask)))
-                
-        return passage_fraction
+            
+            print(" ")
+            print("Passage fraction randoms: " + str(passage_fraction_randoms))
+            print("Number of Randoms Passing Cuts: " + str(passed_events_randoms))
+            print("Total number of randoms: " + str(num_randoms))
+        
+        if lgc_randoms_return:
+            return passage_fraction_randoms
+        else:
+            return passage_fraction
         
     def plot_example_events(self, num_example_events, trace_index, path_to_triggered_data,
                              time_lims=None, lp_freq=None, lgcdiagnostics=False):
@@ -1490,3 +1744,61 @@ class MasterSemiautocuts:
                            
         plt.title("All Cuts, OFAmp vs. Event Time")
         plt.show()
+        
+    def get_example_events(self, num_example_events, trace_index, path_to_triggered_data,
+                           lgcdiagnostics=False):
+        """
+        Returns a set number of traces that pass cuts, for e.g. comparison to autocuts.
+        
+        Parameters
+        ----------
+        
+        num_example_events : int
+            Number of example events to return
+            
+        trace_index : int
+            Index of the trace to plot
+            
+        path_to_triggered_data : str
+            Path to the folder holding triggered data
+            
+        lgcdiagnostics : bool, optional
+            If True, prints our diagnostic statements
+            
+        Returns
+        -------
+        
+        traces_passing : array
+            Array of the traces passing all the cuts
+        """
+        
+        self.df.select(str('cut_all_' + self.channel_name))
+        all_pass_indices = self.df.evaluate('index', selection = True)
+        pass_indicies = np.random.choice(all_pass_indices, num_example_events)
+        
+        all_indices = self.df.evaluate('index')
+        pass_mask = np.isin(all_indices, all_pass_indices)
+        fail_mask = np.invert(pass_mask)
+        
+        #turn off selections
+        self.df.select('_trues')
+        
+        
+        if lgcdiagnostics:
+            print("Passing indices: " + str(pass_indicies))
+            
+            
+        traces_passing = []
+        
+        i = 0
+        while i < len(pass_indicies):
+            traces_passing.append(get_trace(self.df, pass_indicies[i], path_to_triggered_data,
+                                  lgcdiagnostics=lgcdiagnostics)[trace_index])
+            if lgcdiagnostics:
+                if i%10 == 0:
+                    print("Got event " + str(i))
+            i += 1
+            
+            
+        return np.asarray(traces_passing)
+        
