@@ -13,11 +13,10 @@ import importlib
 from inspect import getmembers, isfunction
 from copy import copy
 import qetpy as qp
-import git
+
 
 __all__ = ['ScatterPlotter']
 
-h5 = h5io.H5Reader()
 
 class ScatterPlotter:
     """
@@ -26,9 +25,9 @@ class ScatterPlotter:
     """
     
     def __init__(self, df, path_to_data, rq_1, rq_2,
-                   label_1, label_2, title=None, 
-                fs=int(1.25e6),
-                trace_inds_to_plot=None, trace_inds_labels=None):
+                 label_1, label_2, title=None, 
+                 trace_inds_to_plot=None, trace_inds_labels=None,
+                 selection=None):
         """
         Initialize the ScatterPlotter class.
         
@@ -73,6 +72,9 @@ class ScatterPlotter:
             Array of the labels for the traces that are plotted, e.g.
             ['Melange1pc1ch', 'Melange25pcRight']. If None, the traces
             are not labeled
+            
+        selection : vaex selection string, optional
+            Vaex selection string for the displayed data.
         """
         self.df = df
         self.path_to_data = path_to_data
@@ -84,10 +86,12 @@ class ScatterPlotter:
         self.label_2 = label_2
         self.title = title
                  
-        self.fs = fs
+        self.fs = None
         
         self.trace_inds_to_plot = trace_inds_to_plot
         self.trace_inds_labels = trace_inds_labels
+        
+        self.selection = selection
         
     def _onpick(self, event):
         """
@@ -96,7 +100,9 @@ class ScatterPlotter:
         ind = np.asarray(event.ind)[0]
         self.picked_inds.append(ind)
         
-    def _get_trace(self, index):
+    def _get_trace(self, df_index,
+                   trace_length_msec=None,
+                   pretrigger_length_msec=None):
         """
         Lighter weight function to retrive a trace so it can be plotted
 
@@ -107,35 +113,106 @@ class ScatterPlotter:
             The index (in the vaex dataframe) of the trace being retrived
 
         """
-        #df.select(df.index == index)
-        print("Index: " + str(index))
 
-        dump_number = int(self.df[self.df.index == index].dump_number.values[0])
-        series_number = int(self.df[self.df.index == index].series_number.values[0])
-        event_index = int(self.df[self.df.index == index].event_index.values[0])
+        
+        # instantiate h5reader
+        h5 = h5io.H5Reader()
 
-        if self.df[self.df.index == index].trigger_type.values == 4.0:
-            random_truth = False
-        if self.df[self.df.index == index].trigger_type.values == 3.0:
-            random_truth = True
 
-        if bool(random_truth):
-            event_prefix = '/rand_I2_D'
+        # get list of columns
+        column_list = self.df.get_column_names()
+        
+        # series and dump number, and event number
+        dump_number = int(self.df[self.df.index==df_index].dump_number.values[0])
+        series_number = int(
+            self.df[self.df.index==df_index].series_number.values[0]
+        )
+        event_number = int(
+            self.df[self.df.index==df_index].event_number.values[0]
+        )
+        
+        # event index
+        event_index = None
+        if 'event_index' in  column_list:
+            event_index = int(self.df[self.df.index==df_index].event_index.values[0])
         else:
-            event_prefix = '/threshtrig_I2_D'
+            event_index = event_number%100000
+            
+        # trigger index
+        trigger_index = None
+        if 'trigger_index' in column_list:
+            trigger_index = int(
+                self.df[self.df.index==df_index].trigger_index.values[0]
+            )
+            
 
-        file_name = self.path_to_data + event_prefix + str(series_number)[1:-6]  + "_T" + str(series_number)[-6:] + "_F" + str(dump_number).zfill(4) + ".hdf5"
+        # file name
+        series_name = h5io.extract_series_name(series_number)
+        file_list = glob(self.path_to_data +'/*_' + series_name
+                         + '_F' + str(dump_number).zfill(4)
+                         + '.hdf5')
+        if len(file_list) != 1:
+            raise ValueError('ERROR: No raw data found')
+        file_name = file_list[0]
 
-        trace = h5.read_single_event(event_index = event_index, file_name = file_name, adctoamp = True)
+
+        # sample rate (if None)
+        if self.fs is None:
+            info =  h5.get_metadata(file_name=file_name)
+            adc_name = info['adc_list'][0]
+            self.fs = float(info['groups'][adc_name]['sample_rate'])
+                                
+
+        # convert trace length to samples
+        nb_samples = None
+        nb_pretrigger_samples = None
+        if trace_length_msec is not None:
+            nb_samples = int(
+                round(trace_length_msec*self.fs*1e-3)
+            )
+            nb_pretrigger_samples = nb_samples//2
+
+        if pretrigger_length_msec is not None:
+            nb_pretrigger_samples = int(
+                round(pretrigger_length_msec*self.fs*1e-3)
+            )
+
+        if nb_samples is None:
+            trigger_index = None
+            
+    
+        # get trace
+        trace  = h5.read_single_event(
+            event_index=event_index,
+            file_name=file_name,
+            trigger_index=trigger_index,
+            trace_length_samples=nb_samples,
+            pretrigger_length_samples=nb_pretrigger_samples,
+            adctoamp=True)
+        
         return np.asarray(trace)
     
         
     def plot_picking_scatter(self):
         mpl.rcParams['figure.figsize'] = [8, 5.5]
         fig, ax = plt.subplots()
-        ax.scatter(self.df[self.rq_1].values,
-                    self.df[self.rq_2].values, 
-                    s = 3, picker = True, pickradius = 5)
+        
+        vals1 = self.df[self.rq_1].values
+        vals2 = self.df[self.rq_2].values
+        ax.scatter(vals1,
+                    vals2, 
+                    s = 3, picker = True, pickradius = 5,
+                    )
+        
+        if self.selection is not None:
+            vals1 = self.df[self.selection][self.rq_1].values
+            vals2 = self.df[self.selection][self.rq_2].values
+            
+            ax.scatter(vals1,
+                        vals2, 
+                        s = 3, color = 'C1', label = "Selected Events"
+                        )
+            ax.legend()
         ax.set_xlabel(self.label_1)
         ax.set_ylabel(self.label_2)
         
@@ -145,7 +222,10 @@ class ScatterPlotter:
         fig.canvas.mpl_connect('pick_event', self._onpick)
         plt.show()
         
-    def plot_picked_events(self, lpcutoff=None):
+    def plot_picked_events(self, lpcutoff=None,
+                           trace_length_msec=None,
+                           pretrigger_length_msec=None):
+        
         mpl.rcParams['figure.figsize'] = [6, 9]
         
         i = 0
@@ -153,9 +233,16 @@ class ScatterPlotter:
             fig, axs = plt.subplots(2)
             fig.subplots_adjust(hspace=0.5)
             
-            axs[0].scatter(self.df[self.rq_1].values,
-                       self.df[self.rq_2].values,
-                      label = "All Data", s = 5)
+            vals1 = self.df[self.rq_1].values
+            vals2 = self.df[self.rq_2].values
+            if self.selection is not None:
+                vals1 = self.df[self.selection][self.rq_1].values
+                vals2 = self.df[self.selection][self.rq_2].values
+            
+            axs[0].scatter(vals1,
+                        vals2, 
+                        s = 3, picker = True, pickradius = 5,
+                        )
             
             axs[0].scatter(self.df[self.rq_1].values[self.picked_inds[i]],
                        self.df[self.rq_2].values[self.picked_inds[i]],
@@ -168,10 +255,14 @@ class ScatterPlotter:
             if self.title is not None:
                 axs[0].set_title(self.title)
 
-                
-            retrived_traces = self._get_trace(self.picked_inds[i])
-            t_arr = np.arange(1/self.fs, len(retrived_traces[0])/self.fs, 1/self.fs)
+            retrived_traces = self._get_trace(
+                self.picked_inds[i],
+                trace_length_msec=trace_length_msec,
+                pretrigger_length_msec=pretrigger_length_msec)
             
+            dt = 1/self.fs
+            t_arr = np.asarray(list(range(retrived_traces.shape[-1])))*dt
+                      
             if self.trace_inds_to_plot is None:
                 j = 0
                 while j < len(retrived_traces):
