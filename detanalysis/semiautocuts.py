@@ -1472,7 +1472,7 @@ class MasterSemiautocuts:
         else:
             self.chi2_rq = str('lowchi2_of1x1_nodelay_' + self.channel_name)
         
-    def combine_cuts(self, sat_pass_threshold=None):
+    def combine_cuts(self, sat_pass_threshold=None, cut_name=None):
         """
         Combines the cuts specified during initializtion
         into one.
@@ -1484,8 +1484,14 @@ class MasterSemiautocuts:
             If not none, this is the value above which all
             events will be passed. Used for saturated events,
             which will fail the slope and possibly chi2 cuts.
+            
+            
+        cut_name : string, optional
+            If not none, this is the name of the cut created.
         
         """
+        
+        self.cut_name = cut_name
         
         cuts_all_arr = np.ones(len(self.df), dtype = 'bool')
         
@@ -1501,11 +1507,14 @@ class MasterSemiautocuts:
             ofamp_thresh_mask = (ofamps_arr_all > sat_pass_threshold)
             
             cuts_all_arr = np.logical_or(cuts_all_arr, ofamp_thresh_mask)
+        
+        if cut_name is None:
+            self.cut_name = 'cut_all_' + self.channel_name
+        self.df[self.cut_name] = cuts_all_arr
             
-        self.df['cut_all_' + self.channel_name] = cuts_all_arr
         self.mask = cuts_all_arr
     
-    def get_passage_fraction(self, lgcprint=False):
+    def get_passage_fraction(self, lgcprint=False, lgc_randoms_return=False):
         """
         Calculates and returns the passage fraction for the cut.
         
@@ -1516,6 +1525,10 @@ class MasterSemiautocuts:
             If True, prints a diagostic message including the
             passage fraction and number of passing, failing and
             total events.
+            
+        lgc_randoms_retur : bool, optional
+            If True, returns the randoms passage fraction rather
+            than the total passage fraction.
                 
         Returns
         -------
@@ -1526,14 +1539,28 @@ class MasterSemiautocuts:
         """
             
         passage_fraction = sum(self.mask)/len(self.mask)
+        
+        randoms_mask = self.df[self.df['trigger_type'] == 3.0][self.cut_name].values
+        
+        num_randoms = len(randoms_mask)
+        passed_events_randoms = sum(randoms_mask)
+        passage_fraction_randoms = passed_events_randoms/num_randoms
             
         if lgcprint:
             print("Passage fraction: " + str(passage_fraction))
             print("Number of events passing cuts: " + str(sum(self.mask)))
             print("Number of events failing cuts: " + str(len(self.mask) - sum(self.mask)))
             print("Number of total events: " + str(len(self.mask)))
-                
-        return passage_fraction
+            
+            print(" ")
+            print("Passage fraction randoms: " + str(passage_fraction_randoms))
+            print("Number of Randoms Passing Cuts: " + str(passed_events_randoms))
+            print("Total number of randoms: " + str(num_randoms))
+        
+        if lgc_randoms_return:
+            return passage_fraction_randoms
+        else:
+            return passage_fraction
         
     def plot_example_events(self, num_example_events, trace_index, path_to_triggered_data,
                              time_lims=None, lp_freq=None, lgcdiagnostics=False):
