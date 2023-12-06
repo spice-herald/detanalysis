@@ -1639,8 +1639,10 @@ class Analyzer:
 
     
     def get_event_list(self, cut=None,
+                       lgc_save=False,
+                       hdf5_file='selected_events.hdf5',
                        nb_random_samples=None,
-                       nb_events_check=True,
+                       nb_events_check=False,
                        nb_events_limit=1000):
 
         """
@@ -1698,13 +1700,13 @@ class Analyzer:
         for ievent in range(nb_events):
             event_dict = dict()
             if series_nums is not None:
-                event_dict['series_number'] = series_nums[ievent]
+                event_dict['series_number'] = int(series_nums[ievent])
             if event_nums is not None:
-                event_dict['event_number'] = event_nums[ievent]
+                event_dict['event_number'] = int(event_nums[ievent])
             if group_names is not None:
-                event_dict['group_name'] = group_names[ievent]
+                event_dict['group_name'] = str(group_names[ievent])
             if trigger_indices is not None:
-                event_dict['trigger_index'] = trigger_indices[ievent]
+                event_dict['trigger_index'] = int(trigger_indices[ievent])
                
             event_list.append(event_dict)
 
@@ -1714,7 +1716,14 @@ class Analyzer:
               + str(len(event_list)))
         
 
-            
+        # save hdf5
+        if lgc_save:
+            df_selection = pd.DataFrame(event_list)
+            try:
+                df_selection.to_hdf(hdf5_file, key='events', mode='w')
+            except:
+                print('ERROR: Unable to save file. Does directory exist?')
+                
         return event_list
 
 
