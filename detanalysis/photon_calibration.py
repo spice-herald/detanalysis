@@ -29,7 +29,8 @@ class PhotonCalibration:
     """
     
     def __init__(self, template_model, photon_energy_ev, analyzer_object, 
-                 didv_result, channel_name, fs=1.25e6):
+                 didv_result, channel_name,
+                 fs=1.25e6, trace_length=10e-3, pretrigger_window=None):
         """
         Initializes PhotonCalibration
 
@@ -67,6 +68,12 @@ class PhotonCalibration:
             
         fs : float, optional
             The sampling frequency of the data, defaults to 1.25 MHz.
+            
+        trace_length : float, optional
+            Defaults to 10 ms, the trace length of the data.
+            
+        pretrigger_window : float, optional
+            Defaults to half of the trace_length.
         """
         
         self.template_model = template_model
@@ -88,8 +95,11 @@ class PhotonCalibration:
         self.photon_cut_dict = {}
         
         self.photon_traces_dict = {}
-        self.pretrigger_window = 5e-3
-        self.trace_length = 10e-3
+        if self.pretrigger_window is None:
+            self.pretrigger_window = trace_length/2.0
+        else:
+            self.pretrigger_window = pretrigger_window
+        self.trace_length = trace_length
         self.dt = 0.0
         self.traces_raw_path = None
         self.t_arr = None
@@ -747,12 +757,12 @@ class PhotonCalibration:
             the selection is random (per detanalysis).
             
         pretrigger_window : float, optional
-            If not None, overwrites the object's stored pretrigger window. In
-            units of milliseconds.
+            If None, defaults to the object's stored pretrigger window. In
+            units of seconds.
             
         trace_length : float, optional
-            If not None, overwrites the object's stored trace length. In units
-            of milliseconds.
+            If  None, defaults to the object's stored trace length. In units
+            of seconds.
             
         lgc_plot_example_events : bool, optional
             If True, displays plots showing example events.
@@ -771,14 +781,10 @@ class PhotonCalibration:
         if raw_path is not None:
             self.traces_raw_path = raw_path
         
-        if pretrigger_window is not None:
-            self.pretrigger_window = pretrigger_window
-        else:
+        if pretrigger_window is None:
             pretrigger_window = self.pretrigger_window
             
-        if trace_length is not None:
-            self.trace_length = trace_length
-        else:
+        if trace_length is None:
             trace_length = self.trace_length
             
         if pretrigger_window is None:
