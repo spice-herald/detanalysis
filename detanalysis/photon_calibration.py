@@ -95,7 +95,7 @@ class PhotonCalibration:
         self.photon_cut_dict = {}
         
         self.photon_traces_dict = {}
-        if self.pretrigger_window is None:
+        if pretrigger_window is None:
             self.pretrigger_window = trace_length/2.0
         else:
             self.pretrigger_window = pretrigger_window
