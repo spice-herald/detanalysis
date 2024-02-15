@@ -14,6 +14,7 @@ from inspect import getmembers, isfunction
 from copy import copy
 import qetpy as qp
 import git
+from tabulate import tabulate
 
 __all__ = ['Semiautocut', 'MasterSemiautocut', 'get_trace']
 
@@ -1137,7 +1138,7 @@ class Semiautocut:
         plt.show()
         
             
-    def plot_chi2_vs_ofamp(self, lgcdiagnostics=False, include_previous_cuts=False):
+    def plot_chi2_vs_ofamp(self, lgcdiagnostics=False, include_previous_cuts=False, ylims=None):
         """
         Shows events passing and failing cut on ofamp vs. chi2 plot
         
@@ -1152,6 +1153,9 @@ class Semiautocut:
             cuts. If True, includes all cuts in the dataframe with an RQ
             including "cut_" and the channel name. If an array, includes
             all cut RQs in the array.
+
+        ylims : array, optional
+            If not None, the limits for the y axis in the displayed plot.
         """
         
         #figures out what cuts to include in the "with cuts" plot
@@ -1180,11 +1184,14 @@ class Semiautocut:
         #while i < len(cut_names):
         #    self.df.select(cut_names[i], mode='and')
         #    i += 1
-            
+        
+        if ylims is None:
+            ylims = 'minmax'
         #plot all events
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.chi2_rq], colormap = cmap,
+                            limits = ['minmax', ylims], 
                             f='log', colorbar_label = "log(number/bin), All Events")
                                 
         #plot events passing cuts
@@ -1192,8 +1199,10 @@ class Semiautocut:
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.chi2_rq], colormap = cmap,
                            f='log', selection=cut_names,
+                            limits = ['minmax', ylims], 
                             colorbar_label = "log(number/bin), Passing Cuts")
                             
+        
         #plot horizontal lines for cut limits                   
         i = 0
         while i < len(self.value_lower_arr):
@@ -1206,6 +1215,8 @@ class Semiautocut:
             i += 1
                            
         plt.title("Cuts: " + str(cut_names) + ", \n OFAmp vs. Chi2")
+        if ylims is not None:
+            plt.ylim(ylims[0], ylims[1])
         plt.show()
             
     def plot_histograms(self, lgcdiagnostics=False, include_previous_cuts=False, num_bins=100):
@@ -1801,4 +1812,69 @@ class MasterSemiautocuts:
             
             
         return np.asarray(traces_passing)
+
+    def get_randoms_passfrac_table(self):
+        """
+        Prints a table of cuts and passage fractions for randoms for all cuts in the MSAC
+        object.
+        
+        Parameters
+        ----------
+
+        Returns
+        -------
+
+        """
+
+        randoms_mask = (self.df['trigger_type'].values == 3.0)
+        
+        cuts_mask_arr = np.zeros([len(self.cuts_list), len(randoms_mask)])
+        
+        i = 0
+        while i < len(self.cuts_list):
+            cuts_mask_arr[i,:] = self.df[self.cuts_list[i]].values
+            i += 1
+            
+        passfrac_arr = np.zeros([len(self.cuts_list), len(self.cuts_list)])
+        
+        i = 0
+        while i < len(self.cuts_list):
+            passed_events = np.logical_and(cuts_mask_arr[i,:], randoms_mask)
+            j = 0
+            while j <= i:
+                passed_events = np.logical_and(passed_events, cuts_mask_arr[j,:])
+                passfrac_arr[i,j] = sum(passed_events)/sum(randoms_mask)
+                j += 1
+            i += 1
+            
+        print("Passage fractions for all cuts in MSAC, measured from randoms:")
+        print(" ")
+        print("Cuts list: ")
+        i = 0
+        while i < len(self.cuts_list):
+            print("Cut " + str(i) + ": " + str(self.cuts_list[i]))
+            i += 1
+        print(" ")
+        print("-----------------------------")
+        print(" ")
+        print("Passage fraction for cut in a row from events which also pass cuts in the column title")
+        
+        tab_table = []
+        headers_ = ['Cut Number']
+        i = 0
+        while i < len(self.cuts_list):
+            headers_.append('Cuts ' + str(np.arange(1, i + 1, 1))) 
+            
+            tab_entry = ["Cut " + str(i + 1) + ": "]
+            j = 0
+            while j < len(passfrac_arr[i]):
+                tab_entry.append(str(passfrac_arr[i,j]))
+                j += 1
+            tab_table.append(tab_entry)
+            i += 1
+        
+        print(tabulate(tab_table, headers = headers_, tablefmt = 'orgtbl', floatfmt='.3f'))
+
+
+        
         
