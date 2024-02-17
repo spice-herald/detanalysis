@@ -627,6 +627,75 @@ class PhotonCalibration:
         self.photon_fit_cov = pcov
         
         return popt, pcov, pstds
+        
+    def get_spectrum_energy_res(self, lgc_print=True, lgc_ev=True):
+        """
+        Fits an energy-like (i.e. OFAmp) spectrum from photon calibration data.
+        
+        Parameters
+        ----------
+        lgc_print : bool, optional
+            If True, prints out calculated phonon energy resoltions from the fit
+            spectrum.
+            
+        lgc_ev : bool, optional
+            If True, prints out and returns the phonon energy resoliton in eV
+            rather than in J.
+        
+        
+        Returns
+        -------
+        energy_res : float
+            Energy resolution (either in J or eV)
+            
+        energy_res_err : float
+            Uncertainty in the energy resoltion (either in J or eV) 
+
+        """
+        
+        energy_res = 0.0
+        energy_res_err = 0.0
+        
+        if lgc_ev:
+            photon_energy = self.photon_energy_ev
+        else:
+            photon_energy = self.photon_energy_j
+        model = self.photon_fit_model
+        popt = self.photon_fit_popt
+        pcov = self.photon_fit_cov
+        
+        if model == 'poisson':
+            peak_spacing = popt[0]
+            peak_width = popt[2]
+            energy_res = photon_energy * peak_width/peak_spacing
+            jacobian = np.zeros(len(popt))
+            jacobian[0] = -photon_energy * peak_width * peak_spacing**-2
+            jacobian[2] = photon_energy / peak_spacing
+            energy_res_err = np.sqrt(np.matmul(jacobian, np.matmul(pcov, np.transpose(jacobian))))
+        else:
+            peak_spacing = popt[4] - popt[1]
+            peak_width = popt[2]
+            energy_res = photon_energy * peak_width/peak_spacing
+            jacobian = np.zeros(len(popt))
+            jacobian[1] = photon_energy * peak_width * peak_spacing**-2
+            jacobian[4] = -photon_energy * peak_width * peak_spacing**-2
+            jacobian[2] = photon_energy / peak_spacing
+            energy_res_err = np.sqrt(np.matmul(jacobian, np.matmul(pcov, np.transpose(jacobian))))
+        
+        if lgc_print:
+            print("Model used to fit peaks: " + str(model))
+            print("Measuring energy resolution using photon energy")
+            print("and peak width relative to peak spacing in OFAmp")
+            
+            print(" ")
+            if lgc_ev:
+                print("Energy resolution: " + str(energy_res) + " +/- " + str(energy_res_err) + " eV")
+            else:
+                print("Energy resolution: " + str(energy_res) + " +/- " + str(energy_res_err) + " J")
+        
+        return energy_res, energy_res_err
+        
+
             
         
     def define_photon_cut(self, peak_number, width_sigma, cut_name, 
