@@ -36,11 +36,7 @@ class CleanCommand(Command):
 
 setup(
     name="detanalysis",
-<<<<<<< HEAD
     version="0.3.0",
-=======
-    version="0.2.0",
->>>>>>> 87d0ef5a962c69799ce7ce76c11910bc44062afc
     description="Data Analysis Package",
     long_description=long_description,
     long_description_content_type='text/markdown',
