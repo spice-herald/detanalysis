@@ -1729,6 +1729,7 @@ class Analyzer:
                    nb_random_samples=None,
                    nb_events_check=True,
                    nb_events_limit=1000,
+                   memory_limit = 2,
                    baselinesub=False,
                    baselineinds=(5,100)):
         """
@@ -1774,6 +1775,10 @@ class Analyzer:
         nb_events_limit : int 
             maximum number of traces allowed
             default: 1000
+            
+        memory_limit : float,
+            Memory limit (in Gb) passed to 
+            h5.read_many_events
 
 
         Return
@@ -1811,6 +1816,7 @@ class Analyzer:
             output_format=2,
             include_metadata=True,
             adctoamp=True,
+            memory_limit=memory_limit,
             baselinesub=baselinesub,
             baselineinds=baselineinds
         )
