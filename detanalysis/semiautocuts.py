@@ -1138,7 +1138,7 @@ class Semiautocut:
         plt.show()
         
             
-    def plot_chi2_vs_ofamp(self, lgcdiagnostics=False, include_previous_cuts=False, ylims=None):
+    def plot_chi2_vs_ofamp(self, lgcdiagnostics=False, include_previous_cuts=False, ylims=None, xlims=None):
         """
         Shows events passing and failing cut on ofamp vs. chi2 plot
         
@@ -1155,6 +1155,9 @@ class Semiautocut:
             all cut RQs in the array.
 
         ylims : array, optional
+            If not None, the limits for the y axis in the displayed plot.
+            
+        xlims : array, optional
             If not None, the limits for the y axis in the displayed plot.
         """
         
@@ -1186,12 +1189,20 @@ class Semiautocut:
         #    i += 1
         
         if ylims is None:
-            ylims = 'minmax'
+            ylims_ = 'minmax'
+        else:
+            ylims_ = ylims
+        
+        if xlims is None:
+            xlims_ = 'minmax'
+        else:
+            xlims_ = xlims
+            
         #plot all events
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.chi2_rq], colormap = cmap,
-                            limits = ['minmax', ylims], 
+                            limits = [xlims_, ylims_], 
                             f='log', colorbar_label = "log(number/bin), All Events")
                                 
         #plot events passing cuts
@@ -1199,7 +1210,7 @@ class Semiautocut:
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.chi2_rq], colormap = cmap,
                            f='log', selection=cut_names,
-                            limits = ['minmax', ylims], 
+                            limits = [xlims_, ylims_], 
                             colorbar_label = "log(number/bin), Passing Cuts")
                             
         
@@ -1216,7 +1227,9 @@ class Semiautocut:
                            
         plt.title("Cuts: " + str(cut_names) + ", \n OFAmp vs. Chi2")
         if ylims is not None:
-            plt.ylim(ylims[0], ylims[1])
+            plt.ylim(ylims_[0], ylims_[1])
+        if xlims is not None:
+            plt.xlim(xlims_[0], xlims_[1])
         plt.show()
             
     def plot_histograms(self, lgcdiagnostics=False, include_previous_cuts=False, num_bins=100):
@@ -1434,6 +1447,7 @@ class Semiautocut:
         passage_fraction = sum(self.mask)/len(self.mask)
             
         if lgcprint:
+            print("Cut name: " + str(self.cut_name))
             print("Passage fraction: " + str(passage_fraction))
             print("Number of events passing cuts: " + str(sum(self.mask)))
             print("Number of events failing cuts: " + str(len(self.mask) - sum(self.mask)))
