@@ -150,7 +150,7 @@ class PhotonCalibration:
         gaussian_value :loat
 
         """
-        return height * np.exp(- (x - mean)**2 * (2 * std)**-2)
+        return height * np.exp(- (x - mean)**2 * (2 * std**2)**-1)
     
     def _sum_2_gaussians(self, x,
                          height_1, mean_1, std_1, 
@@ -695,6 +695,56 @@ class PhotonCalibration:
         
         return energy_res, energy_res_err
         
+    
+    def get_nice_photon_spectrum_plot(self, bins=None):
+        """
+        Makes a matplotlib object for a high quality plot, suitable for presentations.
+        
+        Parameters
+        ----------
+        
+        bins : array, optional
+            If not None, used instead of the default bins stored with the object to
+            calculate the plotted histogram.
+        
+        
+        Returns
+        ------- 
+
+        """
+        
+        amp_rq = self.amp_rq
+        cut_rq = self.cut_rq
+        if bins is None:
+            bins = self.spectrum_bins
+        
+        event_heights = self.calibration_df[self.calibration_df[cut_rq]][amp_rq].values
+        
+        spectrum_vals, spectrum_bins = np.histogram(event_heights, bins)
+        spectrum_bins = spectrum_bins[:-1]
+        
+        model = self.photon_fit_model
+        popt = self.photon_fit_popt
+        pcov = self.photon_fit_cov
+        photon_energy = self.photon_energy_ev
+        
+        modeled_vals = self._model_spectrum(spectrum_bins, model, popt)
+        
+        if model == 'poisson':
+            peak_spacing = popt[0]
+            peak_width = popt[2]
+            hist_scale = photon_energy/peak_spacing
+        else:
+            peak_spacing = popt[4] - popt[1]
+            peak_width = popt[2]
+            hist_scale = photon_energy/peak_spacing
+    
+        plt.title("Final State")
+        plt.step(spectrum_bins*hist_scale, spectrum_vals, label='Values', linewidth=2.5, color = 'Blue')
+        plt.plot(spectrum_bins*hist_scale, modeled_vals, label = "Fit Model", linewidth = 2.0, linestyle = 'dashed', color = 'deeppink')
+        #plt.legend()
+        plt.xlabel("Calibrated Energy in Crystal Phonon System (eV)")
+        plt.ylabel("Events Per Bin")
 
             
         
