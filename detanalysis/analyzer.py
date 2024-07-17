@@ -658,7 +658,7 @@ class Analyzer:
 
         self.add_files(self._file_list,
                        load_from_pandas=self._load_from_pandas,
-                       reset=True)
+                       replace=True)
         
     
         
