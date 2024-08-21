@@ -868,7 +868,7 @@ class Semiautocut:
             
             
     #plotting functions
-    def plot_vs_time(self, lgchours=False, lgcdiagnostics=False, include_previous_cuts=False):
+    def plot_vs_time(self, lgchours=False, lgcdiagnostics=False, include_previous_cuts=False, show=True):
         """
         Plots RQ vs. time, showing data that passed and failed cut
         
@@ -923,6 +923,9 @@ class Semiautocut:
         #    i += 1
             
         #plot all events
+        figwidth, figheight = mpl.rcParams['figure.figsize']
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(figwidth, 2*figheight))
+        plt.sca(ax1)
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap((self.df.event_time)/time_norm, self.df[self.cut_rq], colormap = cmap,
@@ -940,24 +943,26 @@ class Semiautocut:
             if self.time_bins_arr is not None:
                 time_limits_arr = np.asarray(self.time_bins_arr).tolist()
                 time_limits_arr.append(max(self.df.event_time.values))
-                plt.hlines([float(self.value_lower_arr[i]), float(self.value_upper_arr[i])],
+                ax1.hlines([float(self.value_lower_arr[i]), float(self.value_upper_arr[i])],
                             float(time_limits_arr[i])/time_norm, float(time_limits_arr[i + 1])/time_norm)
             else:
-                plt.hlines([self.value_lower_arr[i], self.value_upper_arr[i]],
+                ax1.hlines([self.value_lower_arr[i], self.value_upper_arr[i]],
                             min(self.df.event_time.values)/time_norm, max(self.df.event_time.values)/time_norm)
             i += 1
                            
-        plt.title("Cut: " + str(self.cut_name) + ", \n " + str(self.cut_rq) + " vs. Time")
+        ax1.set_title("Cut: " + str(self.cut_name) + ", \n " + str(self.cut_rq) + " vs. Time")
         if lgchours:
-            plt.xlabel("event_time (hours)")
+            ax1.set_xlabel("event_time (hours)")
         else:
-            plt.xlabel("event_time (seconds)")
-        plt.show()
+            ax1.set_xlabel("event_time (seconds)")
         
         #plot zoomed in around cuts
+        plt.sca(ax2)
         center_val_y = 0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr))
         delta_y = max(self.value_upper_arr) - min(self.value_lower_arr)
-        
+
+        print(f'Hi this is Vetri. The limits are {center_val_y - delta_y}, {center_val_y + delta_y}')
+
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap((self.df.event_time)/time_norm, self.df[self.cut_rq], colormap = cmap,
@@ -971,12 +976,12 @@ class Semiautocut:
                             limits=['minmax', [center_val_y - delta_y, center_val_y + delta_y]], 
                              colorbar_label = "log(number/bin), Passing Cuts")
                            
-        plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + " vs. Time \n " + 
+        ax2.set_title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + " vs. Time \n " + 
                   " Zoomed In")
         if lgchours:
-            plt.xlabel("event_time (hours)")
+            ax2.set_xlabel("event_time (hours)")
         else:
-            plt.xlabel("event_time (seconds)")    
+            ax2.set_xlabel("event_time (seconds)")    
         
         #plot horizontal lines for cut limits                   
         i = 0
@@ -984,16 +989,23 @@ class Semiautocut:
             if self.time_bins_arr is not None:
                 time_limits_arr = np.asarray(self.time_bins_arr).tolist()
                 time_limits_arr.append(max(self.df.event_time.values))
-                plt.hlines([self.value_lower_arr[i], self.value_upper_arr[i]],
+                ax2.hlines([self.value_lower_arr[i], self.value_upper_arr[i]],
                             time_limits_arr[i]/time_norm, time_limits_arr[i + 1]/time_norm)
             else:
-                plt.hlines([self.value_lower_arr[i], self.value_upper_arr[i]],
+                ax2.hlines([self.value_lower_arr[i], self.value_upper_arr[i]],
                             min(self.df.event_time.values)/time_norm, max(self.df.event_time.values)/time_norm)
             i += 1
             
-        plt.ylim(center_val_y - delta_y, center_val_y + delta_y)
+        ax2.set_ylim(center_val_y - delta_y, center_val_y + delta_y)
+
+        fig.tight_layout()
+        if show:
+            plt.show()
+
+        x = self.df.event_time/time_norm
+        y = self.df[self.cut_rq]
+        return fig, [ax1, ax2], [x, y]
             
-        plt.show()
         
             
     def plot_vs_ofamp(self, lgcdiagnostics=False, include_previous_cuts=False):

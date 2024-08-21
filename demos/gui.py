@@ -1,9 +1,22 @@
+#first, some imports
+
 import numpy as np
-import matplotlib as mpl
 import matplotlib.pyplot as plt
-import pandas as pd
+import matplotlib as mpl
+mpl.rcParams['figure.figsize'] = [10, 6.5]
+
+#import things associated with detanalysis including semiautocut
+import vaex as vx
+from detanalysis import Analyzer, Semiautocut, MasterSemiautocuts
+
+#for reading in data
+from pytesdaq.io.hdf5 import H5Reader
+import pytesdaq.io.hdf5 as h5io
+h5 = h5io.H5Reader()
+
 from matplotlib.path import Path
 from matplotlib.widgets import LassoSelector
+
 
 
 # Inspired by https://matplotlib.org/stable/gallery/widgets/lasso_selector_demo_sgskip.html
@@ -51,7 +64,7 @@ class SelectFromCollection:
     def onselect(self, verts):
         path = Path(verts)
         print('Verts', verts)
-        print('Path', path)
+        # print('Path', path)
         self.ind = np.nonzero(path.contains_points(self.xys))[0]
         self.fc[:, -1] = self.alpha_other
         self.fc[self.ind, -1] = 1
@@ -66,50 +79,49 @@ class SelectFromCollection:
 
 
 
-if __name__ == '__main__':
+#location of the rq files generated with detprocess
+file_path = '/sdata1/runs/run26/processed/rqgen_feature_I2_D20230405_T154904'
 
-    # Set random seed for reproducibility
-    np.random.seed(42)
+#location of the triggered data on which detprocess was run. Used for plotting
+#example events
+path_to_triggered_data = '/sdata1/runs/run26/processed/triggered_I2_D20230405_T134718'
 
-    # Number of samples
-    n_samples = 1000 # Define the means of the Gaussian distributions for each feature
-    means = [0, 1, 2, 3]
+myanalyzer = Analyzer(file_path, series=None)
 
-    # Define the covariance matrix to introduce correlations between the features# The diagonal elements are the variances (since variance = standard deviation^2)# The off-diagonal elements are the covariances, controlling the correlations
-    covariance_matrix = [
-        [1.0, 0.8, 0.5, 0.3],  # Variances and covariances for feature 1
-        [0.8, 1.0, 0.6, 0.4],  # Variances and covariances for feature 2
-        [0.5, 0.6, 1.0, 0.7],  # Variances and covariances for feature 3
-        [0.3, 0.4, 0.7, 1.0]   # Variances and covariances for feature 4
-    ]
+# show number of events 
+myanalyzer.describe()
 
-    # Generate the dataset using a multivariate Gaussian distribution
-    data = np.random.multivariate_normal(means, covariance_matrix, size=n_samples)
+#df is the vaex dataframe with all the RQs
+df = myanalyzer.df
 
-    # Create a DataFrame with the generated data
-    df = pd.DataFrame(data, columns=['Feature1', 'Feature2', 'Feature3', 'Feature4'])
+print(df.get_column_names())
 
-    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-
-    hist = ax.hist2d(df['Feature1'], df['Feature2'], bins=30, cmap='plasma', norm=mpl.colors.LogNorm())
-    vcollection = mpl.collections.RegularPolyCollection(3, sizes=(1,), offsets=df[['Feature1', 'Feature2']].to_numpy())
-    selector = SelectFromCollection(ax, vcollection)
+cut_pars_baseline = {'sigma_upper':1.4}
 
 
-    fig.colorbar(hist[3], label='Counts (log scale)')
+baseline_cut = Semiautocut(df, cut_rq = 'baseline', channel_name='Melange025pcLeft',
+                               cut_pars=cut_pars_baseline)
 
-    ax.set_title('Feature1 vs Feature2')
-    ax.set_xlabel('Feature1')
-    ax.set_ylabel('Feature2')
+bcut_mask = baseline_cut.do_cut(lgcdiagnostics=True)
 
-    def accept(event):
-        if event.key == "enter":
-            print("Selected points:")
-            print(selector.xys[selector.ind])
-            selector.disconnect()
-            ax.set_title("")
-            fig.canvas.draw()
+fig, axes, data = baseline_cut.plot_vs_time(lgchours=True, lgcdiagnostics=True, show=False)
+ax1, ax2 = axes
+xdata, ydata = data
 
-    fig.canvas.mpl_connect("key_press_event", accept)
+offsets =  np.column_stack((xdata.evaluate(), ydata.evaluate()))
 
-    plt.show()
+vcollection = mpl.collections.RegularPolyCollection(3, sizes=(1,), offsets=offsets)
+selector = SelectFromCollection(ax1, vcollection)
+
+def accept(event):
+    if event.key == "enter":
+        print("Selected points:")
+        print(selector.xys[selector.ind])
+        selector.disconnect()
+        ax1.set_title("")
+        fig.canvas.draw()
+
+fig.canvas.mpl_connect("key_press_event", accept)
+
+plt.show()
+
