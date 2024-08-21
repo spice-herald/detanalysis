@@ -69,7 +69,7 @@ class SelectFromCollection:
         self.fc[:, -1] = self.alpha_other
         self.fc[self.ind, -1] = 1
         self.collection.set_facecolors(self.fc)
-        self.canvas.draw_idle()
+        #self.canvas.draw_idle()
 
     def disconnect(self):
         #self.lasso.disconnect_events()
@@ -80,11 +80,11 @@ class SelectFromCollection:
 
 
 #location of the rq files generated with detprocess
-file_path = '/sdata1/runs/run26/processed/rqgen_feature_I2_D20230405_T154904'
+file_path = '/Users/vetri/GitRepos/Data/rqgen_feature_I2_D20230405_T154904'
 
 #location of the triggered data on which detprocess was run. Used for plotting
 #example events
-path_to_triggered_data = '/sdata1/runs/run26/processed/triggered_I2_D20230405_T134718'
+path_to_triggered_data = '/Users/vetri/GitRepos/Data/triggered_I2_D20230405_T134718'
 
 myanalyzer = Analyzer(file_path, series=None)
 
@@ -109,19 +109,31 @@ ax1, ax2 = axes
 xdata, ydata = data
 
 offsets =  np.column_stack((xdata.evaluate(), ydata.evaluate()))
-
 vcollection = mpl.collections.RegularPolyCollection(3, sizes=(1,), offsets=offsets)
-selector = SelectFromCollection(ax1, vcollection)
 
-def accept(event):
+selector1 = SelectFromCollection(ax1, vcollection)
+
+def accept1(event):
     if event.key == "enter":
         print("Selected points:")
-        print(selector.xys[selector.ind])
-        selector.disconnect()
+        print(selector1.xys[selector1.ind])
+        selector1.disconnect()
         ax1.set_title("")
         fig.canvas.draw()
 
-fig.canvas.mpl_connect("key_press_event", accept)
+fig.canvas.mpl_connect("key_press_event", accept1)
+
+selector2 = SelectFromCollection(ax2, vcollection)
+
+def accept2(event):
+    if event.key == "enter":
+        print("Selected points:")
+        print(selector2.xys[selector2.ind])
+        selector2.disconnect()
+        ax2.set_title("")
+        fig.canvas.draw()
+        
+fig.canvas.mpl_connect("key_press_event", accept2)
 
 plt.show()
 
