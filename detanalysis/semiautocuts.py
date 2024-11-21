@@ -118,7 +118,7 @@ class Semiautocut:
                  cut_pars, time_bins=None, ofamp_bins=None,
                  exceptions_dict={},
                  ofamp_rq=None, chi2_rq=None,
-                 cut_name=None):
+                 cut_name=None, cut_rq_name_override=False):
         """
         Initialize semiautocut class
 
@@ -201,6 +201,12 @@ class Semiautocut:
             vaex dataframe 'cut_ofamp_silly'). If None, defaults to
             "cut_" + cut_rq + "_" + "channel_name"
             
+        cut_rq_name_override : str, optional
+            Defaults to False. If True, cut_rq gives the full cut RQ name, which
+            is not modified before being used for cuts. If False, the channel name
+            is appended to the cut RQ (i.e. ofamp_nodelay_ + channel1) before
+            cutting. 
+            
            
         """
 
@@ -235,6 +241,8 @@ class Semiautocut:
         
         if self.cut_rq_base is ('event_time'): #this means we're doing a time cut
             self.cut_rq = self.cut_rq_base #don't include channel name in full cut rq name
+        elif cut_rq_name_override:
+            self.cut_rq = self.cut_rq_base #overrides the renaming convention
         else:
             self.cut_rq = str(self.cut_rq_base + '_' + self.channel_name)
             

@@ -763,6 +763,7 @@ class PhotonCalibration:
             
         
     def define_photon_cut(self, peak_number, width_sigma, cut_name, 
+                          cut_rq=None,
                           lgc_plot=True, lgc_ylog=False, 
                           lgc_diagnostics=False):
         """
@@ -784,6 +785,9 @@ class PhotonCalibration:
         cut_name : string
             The name of the cut to create using Semiautocuts, e.g.
             'cut_1p_Melange1pc1ch'
+            
+        cut_rq : string, optional
+            If not None, overrides the automatically created cut RQ.
             
         lgc_plot : bool, optional
             If True, displays plots showing the regions selected.
@@ -836,7 +840,10 @@ class PhotonCalibration:
             print("Modified cut name: " + str(cut_name_mod))
             print(" ")
             
-        cut_rq_name_mod = self.amp_rq[:-(len(self.channel_name) + 1)]
+        if cut_rq is not None:
+            cut_rq_name_mod = cut_rq
+        else:
+            cut_rq_name_mod = self.amp_rq[:-(len(self.channel_name) + 1)]
         if lgc_diagnostics:
             print("Modified RQ to cut on name: " + str(cut_rq_name_mod))
             print(" ")
@@ -860,10 +867,12 @@ class PhotonCalibration:
         
         cut_pars = {'val_lower': peak_center - cut_width, 'val_upper': peak_center + cut_width,}
 	
+        cut_rq_override_bool = (cut_rq is not None)
         import detanalysis as da
-        photon_cut = da.Semiautocut(self.calibration_df, cut_rq = cut_rq_name_mod,
+        photon_cut = da.Semiautocut(self.calibration_df, cut_rq=self.amp_rq,
                                    channel_name=self.channel_name,
-                                   cut_pars=cut_pars, cut_name=cut_name)
+                                   cut_pars=cut_pars, cut_name=cut_name,
+                                   cut_rq_name_override=True)
         _ = photon_cut.do_cut(lgcdiagnostics=lgc_diagnostics)
         
         if lgc_plot==True:
