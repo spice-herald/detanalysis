@@ -840,14 +840,6 @@ class PhotonCalibration:
             print("Modified cut name: " + str(cut_name_mod))
             print(" ")
             
-        if cut_rq is not None:
-            cut_rq_name_mod = cut_rq
-        else:
-            cut_rq_name_mod = self.amp_rq[:-(len(self.channel_name) + 1)]
-        if lgc_diagnostics:
-            print("Modified RQ to cut on name: " + str(cut_rq_name_mod))
-            print(" ")
-            
         if lgc_plot:
             event_heights = self.calibration_df[self.calibration_df[self.cut_rq]][self.amp_rq].values
             spectrum_vals, spectrum_bins = np.histogram(event_heights, self.spectrum_bins)
