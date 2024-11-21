@@ -472,11 +472,12 @@ class PhotonCalibration:
         
         spectrum_vals, spectrum_bins = np.histogram(event_heights, bins)
         spectrum_bins = spectrum_bins[:-1]
+        offset = 0.5 * (spectrum_bins[1] - spectrum_bins[0])
         if lgc_diagnostics:
             
             print("Guess: " + str(guess))
             
-            modeled_vals = self._model_spectrum(spectrum_bins, model, guess)
+            modeled_vals = self._model_spectrum(spectrum_bins + offset, model, guess)
 
             plt.title("Initial State")
             plt.step(spectrum_bins, spectrum_vals, label='Values')
@@ -491,7 +492,7 @@ class PhotonCalibration:
             
         
         def _resid(params):
-            modeled_vals = self._model_spectrum(spectrum_bins, model, params)
+            modeled_vals = self._model_spectrum(spectrum_bins + offset, model, params)
             
             weights = np.reciprocal(np.sqrt(spectrum_vals))
             weights[spectrum_vals == 0] = 0
@@ -523,7 +524,7 @@ class PhotonCalibration:
             result_params = result['x']
             
             
-            modeled_vals = self._model_spectrum(spectrum_bins, model, result_params)
+            modeled_vals = self._model_spectrum(spectrum_bins + offset, model, result_params)
             
             plt.title("Final State")
             plt.step(spectrum_bins, spectrum_vals, label='Values')
@@ -739,7 +740,8 @@ class PhotonCalibration:
         pcov = self.photon_fit_cov
         photon_energy = self.photon_energy_ev
         
-        modeled_vals = self._model_spectrum(spectrum_bins, model, popt)
+        offset = 0.5 * (spectrum_bins[1] - spectrum_bins[0])
+        modeled_vals = self._model_spectrum(spectrum_bins + offset, model, popt)
         
 
         if model == 'poisson':
