@@ -1769,6 +1769,37 @@ class MasterSemiautocuts:
             self.chi2_rq = str(chi2_rq + '_' + self.channel_name)
         else:
             self.chi2_rq = str('lowchi2_of1x1_nodelay_' + self.channel_name)
+            
+    def load_cut_dicts(self, cut_dicts_arr, lgc_diagnostics=False):
+        """
+        Loads an array of cuts, performs the cuts, and saves the cut
+        names in the MasterSemiautocuts object.
+        
+        Parameters
+        ----------
+            
+        cuts_dict_arr : array
+            An array of cuts_dicts. Loaded, and then peformed.
+            
+        lgc_diangostics : bool, optional
+            If True, prints out diagnostic messages.
+        """
+        
+        cuts_list = []
+        i = 0
+        while i < len(cut_dicts_arr):
+            SAC = Semiautocut(self.df, cut_rq = ' ', 
+                   channel_name=' ', cut_pars=[],
+                   lgc_diagnostics=lgc_diagnostics)
+            SAC.load_cut_dict(cut_dicts_arr[i])
+            _ = SAC.do_cut(lgcdiagnostics=lgc_diagnostics)
+            
+            cuts_list.append(cut_dicts_arr[i]['cut_name'])
+            
+            i += 1
+            
+        self.cuts_list = cuts_list
+                               
         
     def combine_cuts(self, sat_pass_threshold=None, cut_name=None):
         """
