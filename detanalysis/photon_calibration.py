@@ -43,11 +43,20 @@ class PhotonCalibration:
                 "twopulse": models the power domain template as
                             the sum of two two pole pulses which
                             share the same rise time
+            
+                "threepulse": models the power domain template as
+                            the sum of three two pole pulses which
+                            share the same rise time
                             
                 "deltapulse" : models the power domain template as
                                the sum of a delta function (high for
                                just one time bin) and a two pole
                                pulse.
+                            
+                "deltatwopulse" : models the power domain template as
+                                  the sum of a delta function (high for
+                                  just one time bin) and two two pole
+                                  pulses.
                             
         photon_energy_ev : float
             The energy of the photons used for this calibration
@@ -463,11 +472,12 @@ class PhotonCalibration:
         
         spectrum_vals, spectrum_bins = np.histogram(event_heights, bins)
         spectrum_bins = spectrum_bins[:-1]
+        offset = 0.5 * (spectrum_bins[1] - spectrum_bins[0])
         if lgc_diagnostics:
             
             print("Guess: " + str(guess))
             
-            modeled_vals = self._model_spectrum(spectrum_bins, model, guess)
+            modeled_vals = self._model_spectrum(spectrum_bins + offset, model, guess)
 
             plt.title("Initial State")
             plt.step(spectrum_bins, spectrum_vals, label='Values')
@@ -482,7 +492,7 @@ class PhotonCalibration:
             
         
         def _resid(params):
-            modeled_vals = self._model_spectrum(spectrum_bins, model, params)
+            modeled_vals = self._model_spectrum(spectrum_bins + offset, model, params)
             
             weights = np.reciprocal(np.sqrt(spectrum_vals))
             weights[spectrum_vals == 0] = 0
@@ -514,7 +524,7 @@ class PhotonCalibration:
             result_params = result['x']
             
             
-            modeled_vals = self._model_spectrum(spectrum_bins, model, result_params)
+            modeled_vals = self._model_spectrum(spectrum_bins + offset, model, result_params)
             
             plt.title("Final State")
             plt.step(spectrum_bins, spectrum_vals, label='Values')
@@ -730,7 +740,8 @@ class PhotonCalibration:
         pcov = self.photon_fit_cov
         photon_energy = self.photon_energy_ev
         
-        modeled_vals = self._model_spectrum(spectrum_bins, model, popt)
+        offset = 0.5 * (spectrum_bins[1] - spectrum_bins[0])
+        modeled_vals = self._model_spectrum(spectrum_bins + offset, model, popt)
         
 
         if model == 'poisson':
@@ -754,6 +765,7 @@ class PhotonCalibration:
             
         
     def define_photon_cut(self, peak_number, width_sigma, cut_name, 
+                          cut_rq=None,
                           lgc_plot=True, lgc_ylog=False, 
                           lgc_diagnostics=False):
         """
@@ -775,6 +787,9 @@ class PhotonCalibration:
         cut_name : string
             The name of the cut to create using Semiautocuts, e.g.
             'cut_1p_Melange1pc1ch'
+            
+        cut_rq : string, optional
+            If not None, overrides the automatically created cut RQ.
             
         lgc_plot : bool, optional
             If True, displays plots showing the regions selected.
@@ -827,11 +842,6 @@ class PhotonCalibration:
             print("Modified cut name: " + str(cut_name_mod))
             print(" ")
             
-        cut_rq_name_mod = self.amp_rq[:-(len(self.channel_name) + 1)]
-        if lgc_diagnostics:
-            print("Modified RQ to cut on name: " + str(cut_rq_name_mod))
-            print(" ")
-            
         if lgc_plot:
             event_heights = self.calibration_df[self.calibration_df[self.cut_rq]][self.amp_rq].values
             spectrum_vals, spectrum_bins = np.histogram(event_heights, self.spectrum_bins)
@@ -851,10 +861,12 @@ class PhotonCalibration:
         
         cut_pars = {'val_lower': peak_center - cut_width, 'val_upper': peak_center + cut_width,}
 	
+        cut_rq_override_bool = (cut_rq is not None)
         import detanalysis as da
-        photon_cut = da.Semiautocut(self.calibration_df, cut_rq = cut_rq_name_mod,
+        photon_cut = da.Semiautocut(self.calibration_df, cut_rq=self.amp_rq,
                                    channel_name=self.channel_name,
-                                   cut_pars=cut_pars, cut_name=cut_name)
+                                   cut_pars=cut_pars, cut_name=cut_name,
+                                   cut_rq_name_override=True)
         _ = photon_cut.do_cut(lgcdiagnostics=lgc_diagnostics)
         
         if lgc_plot==True:
@@ -1632,7 +1644,7 @@ class PhotonCalibration:
     
     def _get_deltapulse_f_template(self, amp_1, amp_2, fall_2, rise, t_arr=None, start_time=None, fs=1.25e6):
         """
-        Calculates the time domain delta function plus single exponential
+        Calculates the frequency domain delta function plus single exponential
         pulse template fit to the photon calibration data in the power
         domain.
         
@@ -1665,6 +1677,128 @@ class PhotonCalibration:
         """
             
         template_t = self._get_deltapulse_t_template(amp_1, amp_2, fall_2, rise, t_arr, start_time, fs=fs)
+        
+        return fft(template_t)/np.sqrt(len(template_t) * fs)
+        
+    def _get_deltatwopulse_t_template(self, amp_1, amp_2, amp_3, fall_2, fall_3, rise,
+                                      t_arr=None, start_time=None, fs=1.25e6):
+        """
+        Calculates the time domain delta function plus two exponential
+        pulse templates fit to the photon calibration data in the power
+        domain.
+        
+        Parameters:
+        -----------
+        
+        amp_1 : float
+            The amplitude of the delta function.
+            
+        amp_2 : float
+            The amplitude of the first exponential pulse
+            
+        amp_3 : float
+            The amplitude of the second exponential pulse
+            
+        fall_2 : float
+            The fall time of the first exponential pulse
+            
+        fall_3 : float
+            The fall time of the second exponential pulse
+            
+        rise : float
+            The rise time of the exponential pulse
+            
+        dt : float
+            The difference between the trigger time and the
+            true rise time of the calibration pulses.
+
+        t_arr : array, optional
+            If not None, used to generate the modeled template
+            at these times.
+
+        start_time : float, optional
+            If not None, used instead of the internal start time
+            for the start time for the pulse.
+        """
+
+        if t_arr is None:
+            t_arr = self.t_arr
+
+        if start_time is None:
+            start_time = self.pretrigger_window + self.dt
+        
+        pulse_1 = np.zeros(len(t_arr))
+        delta_start = int(fs*start_time)
+        pulse_1[delta_start] = amp_1
+
+        pulse_2 = make_template_twopole(t_arr, A = 1.0, 
+                                        tau_r=rise, tau_f=fall_2,
+                                        t0=start_time,
+                                        fs=fs) * amp_2
+
+        pulse_3 = make_template_twopole(t_arr, A = 1.0, 
+                                        tau_r=rise, tau_f=fall_3,
+                                        t0=start_time,
+                                        fs=fs) * amp_3
+        
+        if np.isnan(pulse_1).any() or np.isinf(pulse_1).all():
+            pulse_1 = np.zeros(len(pulse_1), dtype = np.float64)
+        if np.isnan(pulse_2).any() or np.isinf(pulse_2).all():
+            pulse_2 = np.zeros(len(pulse_2), dtype = np.float64)
+        if np.isnan(pulse_3).any() or np.isinf(pulse_3).all():
+            pulse_3 = np.zeros(len(pulse_3), dtype = np.float64)
+        
+        return pulse_1 + pulse_2 + pulse_3
+        
+    def _get_deltatwopulse_f_template(self, amp_1, amp_2, amp_3, fall_2, fall_3, rise,
+                                      t_arr=None, start_time=None, fs=1.25e6):
+        """
+        Calculates the frequency domain delta function plus two exponential
+        pulse templates fit to the photon calibration data in the power
+        domain.
+        
+        Parameters:
+        -----------
+        
+        amp_1 : float
+            The amplitude of the delta function.
+            
+        amp_2 : float
+            The amplitude of the first exponential pulse
+            
+        amp_3 : float
+            The amplitude of the second exponential pulse
+            
+        fall_2 : float
+            The fall time of the first exponential pulse
+            
+        fall_3 : float
+            The fall time of the second exponential pulse
+            
+        rise : float
+            The rise time of the exponential pulse
+            
+        dt : float
+            The difference between the trigger time and the
+            true rise time of the calibration pulses.
+
+        t_arr : array, optional
+            If not None, used to generate the modeled template
+            at these times.
+
+        start_time : float, optional
+            If not None, used instead of the internal start time
+            for the start time for the pulse.
+        """
+
+        if t_arr is None:
+            t_arr = self.t_arr
+
+        if start_time is None:
+            start_time = self.pretrigger_window + self.dt
+            
+        template_t = self._get_deltatwopulse_t_template(amp_1, amp_2, amp_3, fall_2, fall_3, rise,
+                                                        t_arr, start_time, fs=fs)
         
         return fft(template_t)/np.sqrt(len(template_t) * fs)
         
@@ -1815,6 +1949,10 @@ class PhotonCalibration:
             amp_1, amp_2, fall_2, rise = params
             model_template_f = self._get_deltapulse_f_template(amp_1, amp_2, fall_2, rise,
                                                                t_arr, start_time, fs=fs)
+        elif self.template_model == 'deltatwopulse':  
+            amp_1, amp_2, amp_3, fall_2, fall_3, rise = params
+            model_template_f = self._get_deltatwopulse_f_template(amp_1, amp_2, amp_3, fall_2, fall_3, rise,
+                                                               t_arr, start_time, fs=fs)
         else:
             print("Unknown template model!")
                 
@@ -1852,6 +1990,10 @@ class PhotonCalibration:
         elif self.template_model == 'deltapulse':  
             amp_1, amp_2, fall_2, rise = params
             model_template_t = self._get_deltapulse_t_template(amp_1, amp_2, fall_2, rise,
+                                                               t_arr, start_time)
+        elif self.template_model == 'deltatwopulse':  
+            amp_1, amp_2, amp_3, fall_2, fall_3, rise = params
+            model_template_t = self._get_deltatwopulse_t_template(amp_1, amp_2, amp_3, fall_2, fall_3, rise,
                                                                t_arr, start_time)
         else:
             print("Unknown template model!")
@@ -1938,6 +2080,31 @@ class PhotonCalibration:
             print("Amplitude Delta Function Pulse: " + str(amp_1) + " +/- " + str(amp_1_err))
             print("Amplitude Exponential Pulse: " + str(amp_2) + " +/- " + str(amp_2_err))
             print("Fall Time Exponential Pulse: " + str(fall_2*1e6) + " +/- " + str(fall_2_err*1e6) + " us")
+            print("Rise Time Exponential Pulse: " + str(rise*1e6) + " +/- " + str(rise_err*1e6) + " us")
+            print("")
+            
+        elif self.template_model == 'deltatwopulse':
+            popt = self.fit_vars_dict[photon_peak_number]
+            pcov = self.fit_cov_dict[photon_peak_number]
+            pstds = np.sqrt(np.diag(pcov))
+            
+            print("popt: ")
+            print(popt)
+            print(" ")
+
+            print("cov:")
+            print(pcov)
+            print(" ")
+            
+            amp_1, amp_2, amp_3, fall_2, fall_3, rise = popt
+            amp_1_err, amp_2_err, amp_3_err, fall_2_err, fall_3_err, rise_err = pstds
+            
+        
+            print("Amplitude Delta Function Pulse: " + str(amp_1) + " +/- " + str(amp_1_err))
+            print("Amplitude First Exponential Pulse: " + str(amp_2) + " +/- " + str(amp_2_err))
+            print("Amplitude Second Exponential Pulse: " + str(amp_3) + " +/- " + str(amp_3_err))
+            print("Fall Time First Exponential Pulse: " + str(fall_2*1e6) + " +/- " + str(fall_2_err*1e6) + " us")
+            print("Fall Time Second Exponential Pulse: " + str(fall_3*1e6) + " +/- " + str(fall_3_err*1e6) + " us")
             print("Rise Time Exponential Pulse: " + str(rise*1e6) + " +/- " + str(rise_err*1e6) + " us")
             print("")
         else:
@@ -2385,6 +2552,8 @@ class PhotonCalibration:
             labels = ['Amp 1', 'Amp 2', 'Amp 3', "Fall 1", "Fall 2", 'Fall 3', "Rise"]
         elif self.template_model == 'deltapulse':
             labels = ['Delta Amplitude', 'Pulse Amplitude', 'Pulse Fall', 'Pulse Rise']
+        elif self.template_model == 'deltatwopulse':
+            labels = ['Delta Amplitude', 'First Pulse Amplitude', 'Second Pulse Amplitude', 'First Pulse Fall', 'Second Pulse Fall', 'Pulse Rise']
         else:
             labels = np.zeros(len(opt))
             
@@ -2458,7 +2627,19 @@ class PhotonCalibration:
                 height_unscaled_list_element.append(amp_2)
                 height_unscaled_list_element.append(amp_2_err)
                 
-                headers_ = ['Photon Peak', 'Height 1 (Delta)', 'Height 1 Err (Pulse)', 'Height 2', 'Height 2 Err']
+                headers_ = ['Photon Peak', 'Height 1 (Delta)', 'Height 1 Err (Delta)', 'Height 2', 'Height 2 Err']
+            elif self.template_model == 'deltatwopulse':
+                amp_1, amp_2, amp_3, fall_2, fall_3, rise = popt
+                amp_1_err, amp_2_err, amp_3_err, fall_2_err, fall_3_err, rise_err = pstds
+                
+                height_unscaled_list_element.append(amp_1)
+                height_unscaled_list_element.append(amp_1_err)
+                height_unscaled_list_element.append(amp_2)
+                height_unscaled_list_element.append(amp_2_err)
+                height_unscaled_list_element.append(amp_3)
+                height_unscaled_list_element.append(amp_3_err)
+                
+                headers_ = ['Photon Peak', 'Height 1 (Delta)', 'Height 1 Err (Delta)', 'Height 2', 'Height 2 Err', 'Height 3', 'Height 3 Err']
             height_unscaled_list.append(height_unscaled_list_element)
             i += 1
                 
@@ -2516,6 +2697,18 @@ class PhotonCalibration:
                 height_scaled_list_element.append(amp_2_err/i)
                 
                 headers_ = ['Photon Peak', 'Height 1 (Delta)', 'Height 1 Err', 'Height 2 (Pulse)', 'Height 2 Err']
+            elif self.template_model == 'deltatwopulse':
+                amp_1, amp_2, amp_3, fall_2, fall_3, rise = popt
+                amp_1_err, amp_2_err, amp_3_err, fall_2_err, fall_3_err, rise_err = pstds
+                
+                height_unscaled_list_element.append(amp_1/i)
+                height_unscaled_list_element.append(amp_1_err/i)
+                height_unscaled_list_element.append(amp_2/i)
+                height_unscaled_list_element.append(amp_2_err/i)
+                height_unscaled_list_element.append(amp_3/i)
+                height_unscaled_list_element.append(amp_3_err/i)
+                
+                headers_ = ['Photon Peak', 'Height 1 (Delta)', 'Height 1 Err (Delta)', 'Height 2', 'Height 2 Err', 'Height 3', 'Height 3 Err']
             height_scaled_list.append(height_scaled_list_element)
             i += 1
                 
@@ -2578,6 +2771,18 @@ class PhotonCalibration:
                 fall_times_list_element.append(rise_err*1e6)
                 
                 headers_ = ['Photon Peak', 'Fall 2 (us)', 'Fall 2 Err (us)', 'Rise (us)', 'Rise Err (us)']
+            elif self.template_model == 'deltatwopulse':
+                amp_1, amp_2, amp_3, fall_2, fall_3, rise = popt
+                amp_1_err, amp_2_err, amp_3_err, fall_2_err, fall_3_err, rise_err = pstds
+                
+                fall_times_list_element.append(fall_2*1e6)
+                fall_times_list_element.append(fall_2_err*1e6)
+                fall_times_list_element.append(fall_3*1e6)
+                fall_times_list_element.append(fall_3_err*1e6)
+                fall_times_list_element.append(rise*1e6)
+                fall_times_list_element.append(rise_err*1e6)
+                
+                headers_ = ['Photon Peak', 'Fall 2 (us)', 'Fall 2 Err (us)', 'Fall 3 (us)', 'Fall 3 Err (us)', 'Rise (us)', 'Rise Err (us)']
             fall_times_list.append(fall_times_list_element)
             i += 1
                 
