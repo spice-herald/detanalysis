@@ -115,10 +115,12 @@ class Semiautocut:
     """
     
     def __init__(self, vaex_dataframe, cut_rq, channel_name, 
-                 cut_pars, time_bins=None, ofamp_bins=None,
+                 cut_pars, time_bins=None, even_time_bins=True,
+                 ofamp_bins=None,
                  exceptions_dict={},
                  ofamp_rq=None, chi2_rq=None,
-                 cut_name=None):
+                 cut_name=None, cut_rq_name_override=False,
+                 lgc_diagnostics=False):
         """
         Initialize semiautocut class
 
@@ -174,6 +176,11 @@ class Semiautocut:
             of events per bin. If it's an array, these will be the start
             of the time bins.
             
+        even_time_bins : bool, optional
+            Defaults to True, i.e. the length of time of each bins
+            is the same. If False, the number of events in each time bin
+            will be the same. 
+            
         ofamp_bins : array or int, optional
             If not none, then the cut will be performed in each ofamp bin
             separately. If it's an int, this is the number of bins to make,
@@ -201,6 +208,16 @@ class Semiautocut:
             vaex dataframe 'cut_ofamp_silly'). If None, defaults to
             "cut_" + cut_rq + "_" + "channel_name"
             
+        cut_rq_name_override : str, optional
+            Defaults to False. If True, cut_rq gives the full cut RQ name, which
+            is not modified before being used for cuts. If False, the channel name
+            is appended to the cut RQ (i.e. ofamp_nodelay_ + channel1) before
+            cutting. 
+            
+        lgc_diagnostics : bool, optional
+            Defaults to False, no diagnostic printouts. If True, prints out
+            some diagnostic messages.
+            
            
         """
 
@@ -209,6 +226,7 @@ class Semiautocut:
         self.channel_name = channel_name
         self.cut_pars = cut_pars
         self.time_bins = time_bins
+        self.even_time_bins = even_time_bins
         self.ofamp_bins = ofamp_bins
         self.exceptions_dict = exceptions_dict
         
@@ -216,6 +234,8 @@ class Semiautocut:
         self.value_upper_arr = []
         self.time_bins_arr = None
         self.ofamp_bins_arr = None
+        
+        self.lgc_diagnostics = lgc_diagnostics
         
         #the mask for this cut, starts out as passing nothing
         self.mask = np.zeros(len(self.df), dtype = 'bool')
@@ -235,6 +255,8 @@ class Semiautocut:
         
         if self.cut_rq_base is ('event_time'): #this means we're doing a time cut
             self.cut_rq = self.cut_rq_base #don't include channel name in full cut rq name
+        elif cut_rq_name_override:
+            self.cut_rq = self.cut_rq_base #overrides the renaming convention
         else:
             self.cut_rq = str(self.cut_rq_base + '_' + self.channel_name)
             
@@ -246,7 +268,8 @@ class Semiautocut:
             self.cut_name = cut_name
         else:
             self.cut_name = str('cut_' + self.cut_rq)
-            print("Cut name: " + str(self.cut_name))
+            if self.lgc_diagnostics:
+                print("Cut name: " + str(self.cut_name))
         self.df[self.cut_name] = np.ones(len(self.df), dtype = 'bool')
 
                 
@@ -255,21 +278,29 @@ class Semiautocut:
             
         #make time bins if starting with number of bins
         if isinstance(self.time_bins, int):
-            num_events = len(self.df)
-            step_size = round(num_events/self.time_bins)
-            
-            time_bins_arr = np.zeros(self.time_bins)
-            i = 0
-            while i < len(time_bins_arr):
-                percentile = float(i)/(self.time_bins) * 100.0
-                time_bins_arr[i] = float(self.df.percentile_approx('event_time', percentile))
-                i += 1
+            if self.even_time_bins is False:
+                num_events = len(self.df)
+                step_size = round(num_events/self.time_bins)
                 
-            print("Constructed time bin array: " + str(time_bins_arr))
+                time_bins_arr = np.zeros(self.time_bins)
+                i = 0
+                while i < len(time_bins_arr):
+                    percentile = float(i)/(self.time_bins) * 100.0
+                    time_bins_arr[i] = float(self.df.percentile_approx('event_time', percentile))
+                    i += 1
+                    
+            if self.even_time_bins is True:
+                all_times = self.df.event_time.values
+                time_bins_arr = np.linspace(min(all_times), max(all_times), self.time_bins + 1)
+                
+            if self.lgc_diagnostics:
+                print("Constructed time bin array: " + str(time_bins_arr))
                 
             self.time_bins_arr = time_bins_arr
         elif self.time_bins is not None:
             self.time_bins_arr = self.time_bins
+        else:
+            self.time_bins_arr = None
             
             
         #make ofamp bins if starting with number of bins
@@ -292,6 +323,87 @@ class Semiautocut:
             self.ofamp_bins_arr = ofamp_bins_arr
         elif self.ofamp_bins is not None:
             self.ofamp_bins_arr = self.ofamp_bins
+        else:
+            self.ofamp_bins_arr = None
+            
+        #we initialize the values arrays to -1e8 at all values as a somewhat
+        #hacky way of knowing if they were set to other values )and should be
+        #used, or if they were never set and should be ignored. I don't use 0.0
+        #as there's a decent chance of this value actually getting used.
+        if self.time_bins_arr is not None:
+            self.values_lower = np.ones(len(self.time_bins_arr))*-1e8
+            self.values_upper = np.ones(len(self.time_bins_arr))*-1e8
+        elif self.ofamp_bins_arr is not None:
+            self.values_lower = np.ones(len(self.ofamp_bins_arr))*-1e8
+            self.values_upper = np.ones(len(self.ofamp_bins_arr))*-1e8
+        else:
+            self.values_lower = np.ones(1)*-1e8
+            self.values_upper = np.ones(1)*-1e8
+            
+    def load_cut_dict(self, cut_dict):
+        """
+        Loads in a cut_dict saved previously
+        
+        Parameters
+        ----------
+        
+        cut_dict : dictionary
+            Dictionary used to re-initialize the cut object.
+        """
+           
+        self.cut_name = cut_dict['cut_name']
+        self.cut_rq = cut_dict['cut_rq']
+        self.time_bins = cut_dict['time_bins']
+        self.time_bins_arr = cut_dict['time_bins_arr']
+        self.ofamp_bins = cut_dict['ofamp_bins']
+        self.ofamp_bins_arr = cut_dict['ofamp_bins_arr']
+        self.ofamp_rq = cut_dict['ofamp_rq']
+        self.chi2_rq = cut_dict['chi2_rq']
+        
+        if self.time_bins_arr is not None:
+            self.values_lower = np.ones(len(self.time_bins_arr))*-1e8
+            self.values_upper = np.ones(len(self.time_bins_arr))*-1e8
+        elif self.ofamp_bins_arr is not None:
+            self.values_lower = np.ones(len(self.ofamp_bins_arr))*-1e8
+            self.values_upper = np.ones(len(self.ofamp_bins_arr))*-1e8
+        else:
+            self.values_lower = np.ones(1)*-1e8
+            self.values_upper = np.ones(1)*-1e8
+        
+        if 'values_lower' in cut_dict:
+            #i.e. if the raw values were saved with the
+            #cuts_dict
+            values_lower = cut_dict['values_lower']
+            values_upper = cut_dict['values_upper']
+            
+            exceptions_dict = {}
+            i = 0
+            while i < len(values_lower):
+            
+                exception_dict = {}
+                #here, we check if the values are not -1e8, i.e. have been
+                #saved as real set values in the cut_dict. If they are -1e8,
+                #they have never been saved as a real value, and we therefore
+                #shouldn't use any e.g. lower cut in a given bin
+                if values_lower[i] != -1e8:
+                    exception_dict['val_lower'] = values_lower[i]
+                if values_upper[i] != -1e8:
+                    exception_dict['val_upper'] = values_upper[i]
+                    
+                exceptions_dict[i] = exception_dict
+                
+                i += 1
+                
+            self.cut_pars = {'val_lower': values_lower[0],
+                             'val_upper': values_upper[0]}
+            self.exceptions_dict = exceptions_dict
+        
+        if 'cut_pars' in cut_dict:
+            #i.e. if the cut parameters rather than the raw valus
+            #were saved with the cuts_dict
+            self.cut_pars = cut_dict['cut_pars']
+            self.exceptions_dict = cut_dict['exceptions_dict']
+        
         
     def do_cut(self, lgcdiagnostics=False, include_previous_cuts=False):
         """
@@ -376,7 +488,8 @@ class Semiautocut:
             i += 1
             
     def _get_cut_mask(self, ofamp_lims=None, time_lims=None, cut_pars=None,
-                      lgcdiagnostics=False, include_previous_cuts=False):
+                      lgcdiagnostics=False, include_previous_cuts=False,
+                      on_cut_bin=0):
         """
         Gets a boolean mask of a simple cut being done in a single bin.
         Defaults to no ofamp or time limits and using the global cut
@@ -404,6 +517,10 @@ class Semiautocut:
             pass baseline and slope cuts). If True, uses all RQs in the dataframe
             starting with 'cut_' and including the channel name. If an array of
             names, uses those cut RQ names.
+            
+        on_cut_bin : int, optional
+            Used to track which cut bin we're on, and which index to save cut
+            values to.
                 
         Returns
         -------
@@ -491,24 +608,32 @@ class Semiautocut:
         
         #value based cuts
         if ('val_upper' in cut_pars):
+            self.values_upper[on_cut_bin] = cut_pars['val_upper']
             value_upper = cut_pars['val_upper']
+            
             if ('val_lower' in cut_pars):
-                value_lower = cut_pars['val_lower']
-                
                 bool_arr_lower = self.df[self.cut_rq].values > cut_pars['val_lower']
                 bool_arr_upper = self.df[self.cut_rq].values < cut_pars['val_upper']
                 
+                self.values_lower[on_cut_bin] = cut_pars['val_lower']
+                value_lower = cut_pars['val_lower']
+                
                 cut_mask = bool_arr_lower & bool_arr_upper
+                
             else:
                 cut_mask = self.df[self.cut_rq].values < cut_pars['val_upper']
+                
         elif ('val_lower' in self.cut_pars):
+            self.values_lower[on_cut_bin] = cut_pars['val_lower']
             value_lower = cut_pars['val_lower']
             cut_mask = self.df[self.cut_rq].values > cut_pars['val_lower']
+                
                 
         #percentile based cuts
         elif ('percent_upper' in cut_pars):
             value_upper = self.df.percentile_approx(self.cut_rq, cut_pars['percent_upper']*100,
                                                     selection=True)
+            self.values_upper[on_cut_bin] = value_upper
             if ('percent_lower' in cut_pars):
                 value_lower = self.df.percentile_approx(self.cut_rq, cut_pars['percent_lower']*100,     
                                                         selection=True)
@@ -516,12 +641,15 @@ class Semiautocut:
                 bool_arr_lower = self.df[self.cut_rq].values > value_lower
                 bool_arr_upper = self.df[self.cut_rq].values < value_upper
                 
+                self.values_lower[on_cut_bin] = value_lower
+                
                 cut_mask = bool_arr_lower & bool_arr_upper
             else:
                 cut_mask = self.df[self.cut_rq].values < value_upper
         elif ('percent_lower' in cut_pars):
             value_lower = self.df.percentile_approx(self.cut_rq, cut_pars['percent_lower']*100, 
                                                     selection=True)
+            self.values_lower[on_cut_bin] = value_lower
             cut_mask = self.df[self.cut_rq].values > value_lower
         elif ('percent' in cut_pars):
             percent_lower = 0.5 - 0.5 * cut_pars['percent']
@@ -529,6 +657,9 @@ class Semiautocut:
             
             value_lower = self.df.percentile_approx(self.cut_rq, percent_lower*100, selection=True)
             value_upper = self.df.percentile_approx(self.cut_rq, percent_upper*100, selection=True)
+            
+            self.values_lower[on_cut_bin] = value_lower
+            self.values_upper[on_cut_bin] = value_upper
             
             bool_arr_lower = self.df[self.cut_rq].values > value_lower
             bool_arr_upper = self.df[self.cut_rq].values < value_upper
@@ -545,16 +676,20 @@ class Semiautocut:
             sigma = np.abs(sigma)
             
             value_upper = median + sigma * self.cut_pars['sigma_upper']
+            self.values_upper[on_cut_bin] = value_upper
                 
             if ('sigma_lower' in cut_pars):
                 value_lower = median - sigma * cut_pars['sigma_lower']
+                self.values_lower[on_cut_bin] = value_lower
                 
                 bool_arr_lower = self.df[self.cut_rq].values > value_lower
                 bool_arr_upper = self.df[self.cut_rq].values < value_upper
                 
                 cut_mask = bool_arr_lower & bool_arr_upper
+                
             else:
                 cut_mask = self.df[self.cut_rq].values < value_upper
+                
         elif ('sigma_lower' in cut_pars):
             #for sigma calculations, if we need them
             median = self.df.percentile_approx(self.cut_rq, 50, selection=True)
@@ -563,7 +698,9 @@ class Semiautocut:
             sigma = np.abs(sigma)
             
             value_lower = median + sigma * cut_pars['sigma_lower']
+            self.values_lower[on_cut_bin] = value_lower
             cut_mask = self.df[self.cut_rq] > value_lower
+            
         elif('sigma' in cut_pars):
             #for sigma calculations, if we need them
             median = self.df.percentile_approx(self.cut_rq, 50, selection=True)
@@ -573,7 +710,8 @@ class Semiautocut:
             
             value_upper = median + sigma * cut_pars['sigma']
             value_lower = median - sigma * cut_pars['sigma']
-            
+            self.values_upper[on_cut_bin] = value_upper
+            self.values_lower[on_cut_bin] = value_lower
             
             bool_arr_lower = self.df[self.cut_rq].values > value_lower
             bool_arr_upper = self.df[self.cut_rq].values < value_upper
@@ -621,7 +759,8 @@ class Semiautocut:
         """
         
         self.mask = self._get_cut_mask(lgcdiagnostics=lgcdiagnostics,
-                                       include_previous_cuts=include_previous_cuts)
+                                       include_previous_cuts=include_previous_cuts,
+                                       on_cut_bin=0)
            
     def _do_time_binned_cut(self, lgcdiagnostics=False, include_previous_cuts=False):
         """
@@ -660,7 +799,8 @@ class Semiautocut:
                     
             current_mask = self._get_cut_mask(time_lims=time_lims_arr, cut_pars=current_exception_pars,
                                               lgcdiagnostics=lgcdiagnostics, 
-                                              include_previous_cuts=include_previous_cuts)
+                                              include_previous_cuts=include_previous_cuts,
+                                              on_cut_bin=i)
             working_mask = working_mask | current_mask
                 
             i += 1
@@ -676,7 +816,8 @@ class Semiautocut:
             current_exception_pars = self.exceptions_dict[i]
         current_mask = self._get_cut_mask(time_lims=time_lims_arr, cut_pars=current_exception_pars, 
                                           lgcdiagnostics=lgcdiagnostics,
-                                          include_previous_cuts=include_previous_cuts)
+                                          include_previous_cuts=include_previous_cuts,
+                                          on_cut_bin=i + 1)
         working_mask = working_mask | current_mask
         
         self.mask = working_mask
@@ -842,7 +983,8 @@ class Semiautocut:
                     
             current_mask = self._get_cut_mask(ofamp_lims=ofamp_lims_arr, cut_pars=current_exception_pars, 
                                               lgcdiagnostics=lgcdiagnostics,
-                                              include_previous_cuts=include_previous_cuts)
+                                              include_previous_cuts=include_previous_cuts, 
+                                              on_cut_bin=i)
             working_mask = working_mask | current_mask
                 
             i += 1
@@ -859,7 +1001,8 @@ class Semiautocut:
             current_exception_pars = self.exceptions_dict[i]
         current_mask = self._get_cut_mask(ofamp_lims=ofamp_lims_arr, cut_pars=current_exception_pars, 
                                           lgcdiagnostics=lgcdiagnostics,
-                                          include_previous_cuts=include_previous_cuts)
+                                          include_previous_cuts=include_previous_cuts,
+                                          on_cut_bin =i + 1)
         working_mask = working_mask | current_mask
         
         self.mask = working_mask
@@ -868,7 +1011,8 @@ class Semiautocut:
             
             
     #plotting functions
-    def plot_vs_time(self, lgchours=False, lgcdiagnostics=False, include_previous_cuts=False):
+    def plot_vs_time(self, lgchours=False, lgcdiagnostics=False,
+                     include_previous_cuts=False, v0=0.0):
         """
         Plots RQ vs. time, showing data that passed and failed cut
         
@@ -887,6 +1031,10 @@ class Semiautocut:
             cuts. If True, includes all cuts in the dataframe with an RQ
             including "cut_" and the channel name. If an array, includes
             all cut RQs in the array.
+            
+        v0 : float, optional
+            Used with the baseline, to construct an estimated baseline
+            power in the channel.
         """
             
         time_norm=1.0
@@ -917,21 +1065,23 @@ class Semiautocut:
         #reset selection 
         self.df['_trues'] = np.ones(len(self.df), dtype = 'bool')
         self.df.select('_trues', mode='replace')
-        #i = 0
-        #while i < len(cut_names):
-        #    self.df.select(cut_names[i], mode='and')
-        #    i += 1
+        
+        if v0 == 0.0:
+            plot_var = self.df[self.cut_rq]
+        else:
+            min_val = min(self.df[self.cut_rq].values)
+            plot_var = (self.df[self.cut_rq] - min_val)*v0*1e15
             
         #plot all events
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
-        self.df.viz.heatmap((self.df.event_time)/time_norm, self.df[self.cut_rq], colormap = cmap,
+        self.df.viz.heatmap((self.df.event_time)/time_norm, plot_var, colormap = cmap,
                             f='log', colorbar_label = "log(number/bin), All Events")
                                 
         #plot events passing cuts
         cmap = copy(mpl.cm.get_cmap('spring') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
-        self.df.viz.heatmap((self.df.event_time)/time_norm, self.df[self.cut_rq], colormap = cmap,
+        self.df.viz.heatmap((self.df.event_time)/time_norm, plot_var, colormap = cmap,
                            f='log', selection=cut_names, colorbar_label = "log(number/bin), Passing Cuts")
                            
         #plot horizontal lines for cut limits                   
@@ -940,10 +1090,26 @@ class Semiautocut:
             if self.time_bins_arr is not None:
                 time_limits_arr = np.asarray(self.time_bins_arr).tolist()
                 time_limits_arr.append(max(self.df.event_time.values))
-                plt.hlines([float(self.value_lower_arr[i]), float(self.value_upper_arr[i])],
+                
+                if v0 == 0.0:
+                    hval_low = float(self.value_lower_arr[i])
+                    hval_high = float(self.value_upper_arr[i])
+                else:
+                    hval_low = (float(self.value_lower_arr[i]) - min_val) * v0 * 1e15
+                    hval_high = (float(self.value_upper_arr[i]) - min_val) * v0 * 1e15
+                    
+                plt.hlines([hval_low, hval_high],
                             float(time_limits_arr[i])/time_norm, float(time_limits_arr[i + 1])/time_norm)
             else:
-                plt.hlines([self.value_lower_arr[i], self.value_upper_arr[i]],
+                
+                if v0 == 0.0:
+                    hval_low = float(self.value_lower_arr[i])
+                    hval_high = float(self.value_upper_arr[i])
+                else:
+                    hval_low = (float(self.value_lower_arr[i]) - min_val) * v0 * 1e15
+                    hval_high = (float(self.value_upper_arr[i]) - min_val) * v0 * 1e15
+                    
+                plt.hlines([hval_low, hval_high],
                             min(self.df.event_time.values)/time_norm, max(self.df.event_time.values)/time_norm)
             i += 1
                            
@@ -952,21 +1118,27 @@ class Semiautocut:
             plt.xlabel("event_time (hours)")
         else:
             plt.xlabel("event_time (seconds)")
+        if v0:
+            plt.ylabel("Baseline Rescaled to Power Units,\nBaseline Subtracted (fW)")
         plt.show()
         
         #plot zoomed in around cuts
-        center_val_y = 0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr))
-        delta_y = max(self.value_upper_arr) - min(self.value_lower_arr)
+        if v0 == 0.0:
+            center_val_y = 0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr))
+            delta_y = max(self.value_upper_arr) - min(self.value_lower_arr)
+        else:
+            center_val_y = (0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr)) - min_val)*v0*1e15
+            delta_y = (max(self.value_upper_arr) - min(self.value_lower_arr))*v0*1e15
         
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
-        self.df.viz.heatmap((self.df.event_time)/time_norm, self.df[self.cut_rq], colormap = cmap,
+        self.df.viz.heatmap((self.df.event_time)/time_norm, plot_var, colormap = cmap,
                             limits=['minmax', [center_val_y - delta_y, center_val_y + delta_y]], 
                             f='log', colorbar_label = "log(number/bin), All Events")
                             
         cmap = copy(mpl.cm.get_cmap('spring') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
-        self.df.viz.heatmap((self.df.event_time)/time_norm, self.df[self.cut_rq], colormap = cmap,
+        self.df.viz.heatmap((self.df.event_time)/time_norm, plot_var, colormap = cmap,
                             f='log', selection=cut_names,
                             limits=['minmax', [center_val_y - delta_y, center_val_y + delta_y]], 
                              colorbar_label = "log(number/bin), Passing Cuts")
@@ -984,14 +1156,35 @@ class Semiautocut:
             if self.time_bins_arr is not None:
                 time_limits_arr = np.asarray(self.time_bins_arr).tolist()
                 time_limits_arr.append(max(self.df.event_time.values))
-                plt.hlines([self.value_lower_arr[i], self.value_upper_arr[i]],
-                            time_limits_arr[i]/time_norm, time_limits_arr[i + 1]/time_norm)
+                
+                if v0 == 0.0:
+                    hval_low = float(self.value_lower_arr[i])
+                    hval_high = float(self.value_upper_arr[i])
+                else:
+                    hval_low = (float(self.value_lower_arr[i]) - min_val) * v0 * 1e15
+                    hval_high = (float(self.value_upper_arr[i]) - min_val) * v0 * 1e15
+                    
+                plt.hlines([hval_low, hval_high],
+                            float(time_limits_arr[i])/time_norm, float(time_limits_arr[i + 1])/time_norm)
             else:
-                plt.hlines([self.value_lower_arr[i], self.value_upper_arr[i]],
+                
+                if v0 == 0.0:
+                    hval_low = float(self.value_lower_arr[i])
+                    hval_high = float(self.value_upper_arr[i])
+                else:
+                    hval_low = (float(self.value_lower_arr[i]) - min_val) * v0 * 1e15
+                    hval_high = (float(self.value_upper_arr[i]) - min_val) * v0 * 1e15
+                    
+                plt.hlines([hval_low, hval_high],
                             min(self.df.event_time.values)/time_norm, max(self.df.event_time.values)/time_norm)
             i += 1
             
-        plt.ylim(center_val_y - delta_y, center_val_y + delta_y)
+        if v0 == 0.0:
+            plt.ylim(center_val_y - delta_y, center_val_y + delta_y)
+        else:
+            plt.ylim(center_val_y - delta_y, center_val_y + delta_y)
+            plt.ylabel("Baseline Rescaled to Power Units,\nBaseline Subtracted (fW)")
+            
             
         plt.show()
         
@@ -1138,7 +1331,9 @@ class Semiautocut:
         plt.show()
         
             
-    def plot_chi2_vs_ofamp(self, lgcdiagnostics=False, include_previous_cuts=False, ylims=None, xlims=None):
+    def plot_chi2_vs_ofamp(self, lgcdiagnostics=False, include_previous_cuts=False,
+                           ylims=None, xlims=None,
+                           chi2_mean=0.0, chi2_std=0.0):
         """
         Shows events passing and failing cut on ofamp vs. chi2 plot
         
@@ -1159,6 +1354,12 @@ class Semiautocut:
             
         xlims : array, optional
             If not None, the limits for the y axis in the displayed plot.
+            
+        chi2_mean : float, optional
+            If not zero, used to plot the mean chi2 value
+            
+        chi2_std : float, optional
+            If not zero, used to plot the bands for expected chi2s
         """
         
         #figures out what cuts to include in the "with cuts" plot
@@ -1220,19 +1421,39 @@ class Semiautocut:
             if self.ofamp_bins_arr is not None:
                 ofamp_limits_arr = np.asarray(self.ofamp_bins_arr).tolist()
                 ofamp_limits_arr.append(max(self.df[self.ofamp_rq].values))
+                if i == 1:
+                    label_ = "Cut Levels"
+                else: 
+                    label_ = None
                 if 'chi2' in str(self.cut_rq):
                     plt.hlines([self.value_lower_arr[i], self.value_upper_arr[i]],
-                                ofamp_limits_arr[i], ofamp_limits_arr[i + 1])
+                                ofamp_limits_arr[i], ofamp_limits_arr[i + 1],
+                                label = label_)
             i += 1
+            
+        if chi2_mean != 0.0:
+            plt.hlines([chi2_mean], min(ofamp_limits_arr) , max(ofamp_limits_arr),
+                       color= 'black', label = "Expected Mean")
+                       
+            if chi2_std != 0.0:
+                plt.hlines([chi2_mean + 2 * chi2_std, chi2_mean - 2 * chi2_std],
+                           min(ofamp_limits_arr) , max(ofamp_limits_arr),
+                           color= 'black', linestyle = 'dashed', label = r"$\pm 2 \sigma$")
+                plt.hlines([chi2_mean + 5 * chi2_std, chi2_mean - 5 * chi2_std],
+                           min(ofamp_limits_arr) , max(ofamp_limits_arr),
+                           color= 'black', linestyle = 'dotted', label = r"$\pm 5 \sigma$")
+                         
                            
         plt.title("Cuts: " + str(cut_names) + ", \n OFAmp vs. Chi2")
         if ylims is not None:
             plt.ylim(ylims_[0], ylims_[1])
         if xlims is not None:
             plt.xlim(xlims_[0], xlims_[1])
+        plt.legend()
         plt.show()
             
-    def plot_histograms(self, lgcdiagnostics=False, include_previous_cuts=False, num_bins=100):
+    def plot_histograms(self, lgcdiagnostics=False, include_previous_cuts=False,
+                        num_bins=100, v0=0.0):
         """
         Plots histogram of RQ showing passing and failing events,
         either for all the data or for each bin in a binned cut.
@@ -1251,6 +1472,11 @@ class Semiautocut:
             
         num_bins : int, optional
             Number of bins to plot in the histogram. Defaults to 100.
+            
+        v0 : float, optional
+            If 0.0, plots as normal. Otherwise, assumes that we're cutting
+            on baseline, and uses this to plot in units of fW instead of amps.
+        
         """
         
         #figures out what cuts to include in the "with cuts" plot
@@ -1276,32 +1502,47 @@ class Semiautocut:
         self.df['_trues'] = np.ones(len(self.df), dtype='bool')
         self.df.select('_trues', mode='replace')
         
-        self.df.viz.histogram(self.cut_rq, label = "All Events", shape=num_bins)
+        if v0 == 0.0:
+            plot_var = self.cut_rq
+        else:
+            min_val = min(self.df[self.cut_rq].values)
+            print(min_val)
+            plot_var = (self.df[self.cut_rq] - min_val) * v0 * 1e15
         
-        self.df.viz.histogram(self.cut_rq, label = "Passing Cut/s", selection=cut_names, shape=num_bins)
+        self.df.viz.histogram(plot_var, label = "All Events", shape=num_bins)
+        
+        self.df.viz.histogram(plot_var, label = "Passing Cut/s", selection=cut_names, shape=num_bins)
         plt.yscale('log')
         plt.legend()
         plt.grid()
         plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + " Histogram")
+        if v0 != 0.0:
+            plt.xlabel("Estimated Baseline Power, Baseline Subtraced (fW)")
         plt.show()
         
         #plot zoomed events
-        center_val_y = 0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr))
-        delta_y = max(self.value_upper_arr) - min(self.value_lower_arr)
+        if v0 == 0.0:
+            center_val_y = 0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr))
+            delta_y = max(self.value_upper_arr) - min(self.value_lower_arr)
+        else: 
+            center_val_y = (0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr)) - min_val) * v0 * 1e15
+            delta_y = (max(self.value_upper_arr) - min(self.value_lower_arr)) * v0 * 1e15
         
         #reset selection 
         self.df['_trues'] = np.ones(len(self.df), dtype='bool')
         self.df.select('_trues', mode='replace')
         
-        self.df.viz.histogram(self.cut_rq, label = "All Events", shape=num_bins, 
+        self.df.viz.histogram(plot_var, label = "All Events", shape=num_bins, 
                                 limits=[center_val_y - delta_y, center_val_y + delta_y])
         
-        self.df.viz.histogram(self.cut_rq, label = "Passing Cut/s", selection=cut_names, shape=num_bins,
+        self.df.viz.histogram(plot_var, label = "Passing Cut/s", selection=cut_names, shape=num_bins,
                                 limits=[center_val_y - delta_y, center_val_y + delta_y])
         plt.yscale('log')
         plt.legend()
         plt.grid()
         plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + " Histogram")
+        if v0 != 0.0:
+            plt.xlabel("Estimated Baseline Power, Baseline Subtraced (fW)")
         plt.show()
             
     def plot_example_events(self, num_example_events, trace_index, path_to_triggered_data,
@@ -1455,6 +1696,47 @@ class Semiautocut:
                 
         return passage_fraction
         
+        
+    def get_cut_dict(self, save_values=True):
+        """
+        Returns a dictionary which can be used to save the cut parameters.
+        
+        Parameters
+        ----------
+            
+        save_values : bool, optional
+            If True, saves the raw values of the cut (i.e. cut at a value of
+            -1.244e-7) rather than a cut parameter (i.e. 2.3 sigma).
+                
+        Returns
+        -------
+            
+        cut_save_dict : float
+            Dictionary that saves the cut parameters to be loaded
+            in other dictionaries.
+            
+        """
+        
+        cut_dict = {'cut_name': self.cut_name,
+                    'cut_rq': self.cut_rq,
+                    'time_bins': self.time_bins,
+                    'time_bins_arr': self.time_bins_arr,
+                    'ofamp_bins': self.ofamp_bins,
+                    'ofamp_bins_arr': self.ofamp_bins_arr,
+                    'ofamp_rq': self.ofamp_rq,
+                    'chi2_rq': self.chi2_rq
+                    }
+                    
+        if save_values:
+            cut_dict['values_lower'] = self.values_lower
+            cut_dict['values_upper'] = self.values_upper
+        else:
+            cut_dict['cut_pars'] = self.cut_pars
+            cut_dict['exceptions_dict'] = self.exceptions_dict
+            
+        return cut_dict
+        
+        
 
 class MasterSemiautocuts:
     """
@@ -1496,6 +1778,37 @@ class MasterSemiautocuts:
             self.chi2_rq = str(chi2_rq + '_' + self.channel_name)
         else:
             self.chi2_rq = str('lowchi2_of1x1_nodelay_' + self.channel_name)
+            
+    def load_cut_dicts(self, cut_dicts_arr, lgc_diagnostics=False):
+        """
+        Loads an array of cuts, performs the cuts, and saves the cut
+        names in the MasterSemiautocuts object.
+        
+        Parameters
+        ----------
+            
+        cuts_dict_arr : array
+            An array of cuts_dicts. Loaded, and then peformed.
+            
+        lgc_diangostics : bool, optional
+            If True, prints out diagnostic messages.
+        """
+        
+        cuts_list = []
+        i = 0
+        while i < len(cut_dicts_arr):
+            SAC = Semiautocut(self.df, cut_rq = ' ', 
+                   channel_name=' ', cut_pars=[],
+                   lgc_diagnostics=lgc_diagnostics)
+            SAC.load_cut_dict(cut_dicts_arr[i])
+            _ = SAC.do_cut(lgcdiagnostics=lgc_diagnostics)
+            
+            cuts_list.append(cut_dicts_arr[i]['cut_name'])
+            
+            i += 1
+            
+        self.cuts_list = cuts_list
+                               
         
     def combine_cuts(self, sat_pass_threshold=None, cut_name=None):
         """
