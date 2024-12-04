@@ -120,7 +120,7 @@ class Semiautocut:
                  exceptions_dict={},
                  ofamp_rq=None, chi2_rq=None,
                  cut_name=None, cut_rq_name_override=False,
-                 lgc_diagnostics=False):
+                 lgc_diagnostics=True):
         """
         Initialize semiautocut class
 
@@ -488,7 +488,7 @@ class Semiautocut:
             i += 1
             
     def _get_cut_mask(self, ofamp_lims=None, time_lims=None, cut_pars=None,
-                      lgcdiagnostics=False, include_previous_cuts=False,
+                      lgcdiagnostics=True, include_previous_cuts=False,
                       on_cut_bin=0):
         """
         Gets a boolean mask of a simple cut being done in a single bin.
@@ -604,8 +604,6 @@ class Semiautocut:
         if sum(self.df.evaluate('_trues', selection=True)) == 0:
             return np.zeros(len(self.df), dtype = 'bool')
             
-            
-        
         #value based cuts
         if ('val_upper' in cut_pars):
             self.values_upper[on_cut_bin] = cut_pars['val_upper']
@@ -624,9 +622,9 @@ class Semiautocut:
                 cut_mask = self.df[self.cut_rq].values < cut_pars['val_upper']
                 
         elif ('val_lower' in self.cut_pars):
-            self.values_lower[on_cut_bin] = cut_pars['val_lower']
-            value_lower = cut_pars['val_lower']
-            cut_mask = self.df[self.cut_rq].values > cut_pars['val_lower']
+            self.values_lower[on_cut_bin-1] = self.cut_pars['val_lower']
+            value_lower = self.cut_pars['val_lower']
+            cut_mask = self.df[self.cut_rq].values > self.cut_pars['val_lower']
                 
                 
         #percentile based cuts
@@ -946,7 +944,7 @@ class Semiautocut:
             
         
             
-    def _do_ofamp_binned_cut(self, lgcdiagnostics=False, include_previous_cuts=False):
+    def _do_ofamp_binned_cut(self, lgcdiagnostics=True, include_previous_cuts=False):
         """
         Performs a ofamp binned cut, with exceptions in the
         relevent bins.
@@ -967,6 +965,7 @@ class Semiautocut:
             
         
         """
+        print(lgcdiagnostics)
         working_mask = np.zeros(len(self.df), dtype = 'bool')
         i = 0
         while i < len(self.ofamp_bins_arr) - 1:
@@ -1779,7 +1778,7 @@ class MasterSemiautocuts:
         else:
             self.chi2_rq = str('lowchi2_of1x1_nodelay_' + self.channel_name)
             
-    def load_cut_dicts(self, cut_dicts_arr, lgc_diagnostics=False):
+    def load_cut_dicts(self, cut_dicts_arr, lgc_diagnostics=True):
         """
         Loads an array of cuts, performs the cuts, and saves the cut
         names in the MasterSemiautocuts object.
@@ -2203,5 +2202,11 @@ class MasterSemiautocuts:
         print(tabulate(tab_table, headers = headers_, tablefmt = 'orgtbl', floatfmt='.3f'))
 
 
+    def get_final_values(self,feature_exp):
+
+        values = np.array(
+            self.df.evaluate(feature_exp,selection='cut_all_'+self.channel_name)
+        )
         
+        return values
         
