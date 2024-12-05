@@ -282,12 +282,13 @@ class Semiautocut:
                 num_events = len(self.df)
                 step_size = round(num_events/self.time_bins)
                 
-                time_bins_arr = np.zeros(self.time_bins)
+                time_bins_arr = np.zeros(self.time_bins + 1)
                 i = 0
-                while i < len(time_bins_arr):
+                while i < len(time_bins_arr) - 1:
                     percentile = float(i)/(self.time_bins) * 100.0
                     time_bins_arr[i] = float(self.df.percentile_approx('event_time', percentile))
                     i += 1
+                time_bins_arr[-1] = max(self.df.event_time.values)
                     
             if self.even_time_bins is True:
                 all_times = self.df.event_time.values
@@ -340,7 +341,7 @@ class Semiautocut:
             self.values_lower = np.ones(1)*-1e8
             self.values_upper = np.ones(1)*-1e8
             
-    def load_cut_dict(self, cut_dict):
+    def load_cut_dict(self, cut_dict, lgc_diagnostics=False):
         """
         Loads in a cut_dict saved previously
         
@@ -352,6 +353,9 @@ class Semiautocut:
         """
            
         self.cut_name = cut_dict['cut_name']
+        if lgc_diagnostics:
+            print("Loaded cut name: " + str(self.cut_name))
+        
         self.cut_rq = cut_dict['cut_rq']
         self.time_bins = cut_dict['time_bins']
         self.time_bins_arr = cut_dict['time_bins_arr']
@@ -397,12 +401,20 @@ class Semiautocut:
             self.cut_pars = {'val_lower': values_lower[0],
                              'val_upper': values_upper[0]}
             self.exceptions_dict = exceptions_dict
+            
+            if lgc_diagnostics:
+                print("Loaded exceptions dict: ")
+                print(exceptions_dict)
         
         if 'cut_pars' in cut_dict:
-            #i.e. if the cut parameters rather than the raw valus
+            #i.e. if the cut parameters rather than the raw values
             #were saved with the cuts_dict
             self.cut_pars = cut_dict['cut_pars']
             self.exceptions_dict = cut_dict['exceptions_dict']
+            
+            if lgc_diagnostics:
+                print("Loaded exceptions dict: ")
+                print(cut_dict['exceptions_dict'])
         
         
     def do_cut(self, lgcdiagnostics=False, include_previous_cuts=False):
@@ -802,12 +814,14 @@ class Semiautocut:
             working_mask = working_mask | current_mask
                 
             i += 1
-                
+            
+        """    
         if lgcdiagnostics:
            print(" ")
            print(" ")
            print("On bin " + str(i))
         #last bin doesn't have an upper limit
+        
         time_lims_arr = [self.time_bins_arr[-1], max(self.df.event_time.values)]
         current_exception_pars = None
         if len(self.time_bins_arr) - 1 in self.exceptions_dict:
@@ -817,6 +831,7 @@ class Semiautocut:
                                           include_previous_cuts=include_previous_cuts,
                                           on_cut_bin=i + 1)
         working_mask = working_mask | current_mask
+        """
         
         self.mask = working_mask
         
@@ -1778,6 +1793,60 @@ class MasterSemiautocuts:
         else:
             self.chi2_rq = str('lowchi2_of1x1_nodelay_' + self.channel_name)
             
+    def _create_diff_rq(self, new_rq_name, sub_rq_1, sub_rq_2):
+        """
+        Creates a new RQ from the difference of two existing RQs.
+        Used e.g. to create delta chi2s or slope RQs. 
+        
+        Parameters
+        ----------
+            
+        new_rq_name : string
+            The name of the new RQ which is created
+            
+        sub_rq_1 : string
+            The name of the first RQ being subtracted
+            
+        sub_rq_2 : string
+            The name of the second RQ being subtracted
+        """
+        self.df[new_rq_name] = self.df[sub_rq_1] - self.df[sub_rq_2]
+            
+    def create_cut_rqs(self, rqs_dicts, lgc_diagnostics=False):
+        """
+        Creates new RQs (e.g. delta chi2s, slopes) from a list
+        of dictionaries. The dictionaries have the keys:
+            -New RQ Name
+            -subsidiary RQ names
+            -RQ type, currently the only type supported is "difference",
+             i.e. df.rq_1 - df.rq_2
+        
+        Parameters
+        ----------
+        
+        rqs_dicts : list of dicts
+            List of dictionaries used to create the difference RQs
+            
+        lgc_diagnostics : bool, optional
+            If True, prints out diagnostic statements
+        """
+        
+        i = 0
+        while i < len(rqs_dicts):
+            if rqs_dicts[i]['cut_type'] == 'difference':
+                new_rq_name = rqs_dicts[i]['new_rq_name']
+                sub_rq_1 = rqs_dicts[i]['sub_rq_1']
+                sub_rq_2 = rqs_dicts[i]['sub_rq_2']
+                self._create_diff_rq(new_rq_name, sub_rq_1, sub_rq_2)
+                
+                if lgc_diagnostics:
+                    print("Created RQ " + str(new_rq_name) + " from " + str(sub_rq_1) + " and " + str(sub_rq_2))
+                
+            else:
+                print("ERROR: you're tring to create a type of new RQ that isn't currently supported!!")
+                print("Currently, only difference type RQ creation is supported.")
+            i += 1
+            
     def load_cut_dicts(self, cut_dicts_arr, lgc_diagnostics=False):
         """
         Loads an array of cuts, performs the cuts, and saves the cut
@@ -1799,7 +1868,7 @@ class MasterSemiautocuts:
             SAC = Semiautocut(self.df, cut_rq = ' ', 
                    channel_name=' ', cut_pars=[],
                    lgc_diagnostics=lgc_diagnostics)
-            SAC.load_cut_dict(cut_dicts_arr[i])
+            SAC.load_cut_dict(cut_dicts_arr[i], lgc_diagnostics=lgc_diagnostics)
             _ = SAC.do_cut(lgcdiagnostics=lgc_diagnostics)
             
             cuts_list.append(cut_dicts_arr[i]['cut_name'])
@@ -1809,7 +1878,8 @@ class MasterSemiautocuts:
         self.cuts_list = cuts_list
                                
         
-    def combine_cuts(self, sat_pass_threshold=None, cut_name=None):
+    def combine_cuts(self, sat_pass_threshold=None, cut_name=None,
+                     cuts_to_combine=None, lgc_diagnostics=False):
         """
         Combines the cuts specified during initializtion
         into one.
@@ -1825,6 +1895,9 @@ class MasterSemiautocuts:
             
         cut_name : string, optional
             If not none, this is the name of the cut created.
+            
+        lgc_diagnostics : bool, optional
+            If True, prints out diagnostic statements
         
         """
         
@@ -1832,24 +1905,115 @@ class MasterSemiautocuts:
         
         cuts_all_arr = np.ones(len(self.df), dtype = 'bool')
         
+        if cuts_to_combine is None:
+            cuts_to_combine = self.cuts_list
+            
+        if lgc_diagnostics:
+            print("Combining cuts: " + str(cuts_to_combine))
+            
         i = 0
-        while i < len(self.cuts_list):
-            current_cut_arr = self.df[self.cuts_list[i]].values
+        while i < len(cuts_to_combine):
+            current_cut_arr = self.df[cuts_to_combine[i]].values
             cuts_all_arr = np.logical_and(cuts_all_arr, current_cut_arr)
-        
+            if lgc_diagnostics:
+                print("Done with cut " + str(i))
+            
             i += 1
+            
             
         if sat_pass_threshold is not None:
             ofamps_arr_all = self.df[self.ofamp_rq].values
             ofamp_thresh_mask = (ofamps_arr_all > sat_pass_threshold)
             
             cuts_all_arr = np.logical_or(cuts_all_arr, ofamp_thresh_mask)
+            if lgc_diagnostics:
+                print("Passed saturated events above " + str(sat_pass_threshold))
         
         if cut_name is None:
             self.cut_name = 'cut_all_' + self.channel_name
         self.df[self.cut_name] = cuts_all_arr
             
         self.mask = cuts_all_arr
+        
+    def create_load_combine_cuts(self, master_dict, lgc_diagnostics=False):
+        """
+        Using the previous three functions, creates new cut RQs,
+        loads cut levels, and combines relevent cuts into a master
+        cut.
+        
+        Parameters
+        ----------
+        
+        master_dict : dict of dicts
+            Dictionary of dictionaries, with keys:
+            -'creation': returns the list of dicts used to create RQs
+            -'cuts': returns the list of dicts used to create the cuts
+            -'combo': a dict with parameters 'cut_name' and 
+             'sat_pass_threshold' for the cut combination.
+             'cuts_to_combine' is an optional list of cuts to combine, if
+             they're not being loaded throigh the 'cuts' dict within the
+             master_dict.
+            
+        lgc_diagnostics : bool, optional
+            If True, prints out diagnostic statements
+             
+        """
+        
+        creation = master_dict['creation']
+        self.create_cut_rqs(creation, lgc_diagnostics=lgc_diagnostics)
+        if lgc_diagnostics:
+            print("Done with RQ creation")
+            print(" ")
+        
+        cuts = master_dict['cuts']
+        self.load_cut_dicts(cuts, lgc_diagnostics=lgc_diagnostics)
+        if lgc_diagnostics:
+            print("Done with cut creation")
+            print(" ")
+        
+        combo = master_dict['combo']
+        if 'cuts_to_combine' in combo.keys():
+            cuts_to_combine = combo['cuts_to_combine']
+        else:
+            cuts_to_combine = None
+            
+        self.combine_cuts(sat_pass_threshold=combo['sat_pass_threshold'],
+                          cut_name=combo['cut_name'],
+                          cuts_to_combine=cuts_to_combine,
+                          lgc_diagnostics=lgc_diagnostics)
+        if lgc_diagnostics:
+            print("Done with cut combination")
+            print(" ")
+                          
+    def batch_create_load_combine_cuts(self, master_dict_list, lgc_diagnostics=False):
+        """
+        Given a list of master_dicts, creates cut RQs, performs cuts,
+        and combines cuts for each one on the list. Architecturally,
+        you can run this once with the right master_dict_list, and it
+        should set up all your cuts for you.
+        
+        Parameters
+        ----------
+        
+        master_dict_list : list of dicts
+            List of the master_dicts used to create cuts as above
+            
+        lgc_diagnostics : bool, optional
+            If True, prints out diagnostic statements
+        """
+        
+        i = 0
+        while i < len(master_dict_list):
+            if lgc_diagnostics:
+                print("-------------------------------")
+                print("Starting on master_dict " + str(i))
+            self.create_load_combine_cuts(master_dict_list[i], lgc_diagnostics=lgc_diagnostics)
+            if lgc_diagnostics:
+                print(" ")
+                print(" ")
+                print(" ")
+            i += 1
+    
     
     def get_passage_fraction(self, lgcprint=False, lgc_randoms_return=False):
         """
