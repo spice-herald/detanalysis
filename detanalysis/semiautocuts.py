@@ -604,8 +604,6 @@ class Semiautocut:
         if sum(self.df.evaluate('_trues', selection=True)) == 0:
             return np.zeros(len(self.df), dtype = 'bool')
             
-            
-        
         #value based cuts
         if ('val_upper' in cut_pars):
             self.values_upper[on_cut_bin] = cut_pars['val_upper']
@@ -624,9 +622,9 @@ class Semiautocut:
                 cut_mask = self.df[self.cut_rq].values < cut_pars['val_upper']
                 
         elif ('val_lower' in self.cut_pars):
-            self.values_lower[on_cut_bin] = cut_pars['val_lower']
-            value_lower = cut_pars['val_lower']
-            cut_mask = self.df[self.cut_rq].values > cut_pars['val_lower']
+            self.values_lower[on_cut_bin-1] = self.cut_pars['val_lower']
+            value_lower = self.cut_pars['val_lower']
+            cut_mask = self.df[self.cut_rq].values > self.cut_pars['val_lower']
                 
                 
         #percentile based cuts
@@ -967,6 +965,7 @@ class Semiautocut:
             
         
         """
+
         working_mask = np.zeros(len(self.df), dtype = 'bool')
         i = 0
         while i < len(self.ofamp_bins_arr) - 1:
@@ -2201,7 +2200,4 @@ class MasterSemiautocuts:
             i += 1
         
         print(tabulate(tab_table, headers = headers_, tablefmt = 'orgtbl', floatfmt='.3f'))
-
-
-        
         
