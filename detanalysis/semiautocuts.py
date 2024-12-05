@@ -120,7 +120,7 @@ class Semiautocut:
                  exceptions_dict={},
                  ofamp_rq=None, chi2_rq=None,
                  cut_name=None, cut_rq_name_override=False,
-                 lgc_diagnostics=True):
+                 lgc_diagnostics=False):
         """
         Initialize semiautocut class
 
@@ -488,7 +488,7 @@ class Semiautocut:
             i += 1
             
     def _get_cut_mask(self, ofamp_lims=None, time_lims=None, cut_pars=None,
-                      lgcdiagnostics=True, include_previous_cuts=False,
+                      lgcdiagnostics=False, include_previous_cuts=False,
                       on_cut_bin=0):
         """
         Gets a boolean mask of a simple cut being done in a single bin.
@@ -944,7 +944,7 @@ class Semiautocut:
             
         
             
-    def _do_ofamp_binned_cut(self, lgcdiagnostics=True, include_previous_cuts=False):
+    def _do_ofamp_binned_cut(self, lgcdiagnostics=False, include_previous_cuts=False):
         """
         Performs a ofamp binned cut, with exceptions in the
         relevent bins.
@@ -1778,7 +1778,7 @@ class MasterSemiautocuts:
         else:
             self.chi2_rq = str('lowchi2_of1x1_nodelay_' + self.channel_name)
             
-    def load_cut_dicts(self, cut_dicts_arr, lgc_diagnostics=True):
+    def load_cut_dicts(self, cut_dicts_arr, lgc_diagnostics=False):
         """
         Loads an array of cuts, performs the cuts, and saves the cut
         names in the MasterSemiautocuts object.
@@ -2200,13 +2200,4 @@ class MasterSemiautocuts:
             i += 1
         
         print(tabulate(tab_table, headers = headers_, tablefmt = 'orgtbl', floatfmt='.3f'))
-
-
-    def get_final_values(self,feature_exp):
-
-        values = np.array(
-            self.df.evaluate(feature_exp,selection='cut_all_'+self.channel_name)
-        )
-        
-        return values
         
