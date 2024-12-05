@@ -965,7 +965,7 @@ class Semiautocut:
             
         
         """
-        print(lgcdiagnostics)
+
         working_mask = np.zeros(len(self.df), dtype = 'bool')
         i = 0
         while i < len(self.ofamp_bins_arr) - 1:
