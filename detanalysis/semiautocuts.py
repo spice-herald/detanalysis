@@ -1879,7 +1879,7 @@ class MasterSemiautocuts:
                                
         
     def combine_cuts(self, sat_pass_threshold=None, cut_name=None,
-                     cuts_to_combine=None, lgc_diagnostics=False):
+                     lgc_diagnostics=False):
         """
         Combines the cuts specified during initializtion
         into one.
@@ -1892,7 +1892,6 @@ class MasterSemiautocuts:
             events will be passed. Used for saturated events,
             which will fail the slope and possibly chi2 cuts.
             
-            
         cut_name : string, optional
             If not none, this is the name of the cut created.
             
@@ -1904,16 +1903,13 @@ class MasterSemiautocuts:
         self.cut_name = cut_name
         
         cuts_all_arr = np.ones(len(self.df), dtype = 'bool')
-        
-        if cuts_to_combine is None:
-            cuts_to_combine = self.cuts_list
             
         if lgc_diagnostics:
             print("Combining cuts: " + str(cuts_to_combine))
             
         i = 0
-        while i < len(cuts_to_combine):
-            current_cut_arr = self.df[cuts_to_combine[i]].values
+        while i < len(self.cuts_list):
+            current_cut_arr = self.df[self.cuts_list[i]].values
             cuts_all_arr = np.logical_and(cuts_all_arr, current_cut_arr)
             if lgc_diagnostics:
                 print("Done with cut " + str(i))
@@ -1974,12 +1970,11 @@ class MasterSemiautocuts:
         combo = master_dict['combo']
         if 'cuts_to_combine' in combo.keys():
             cuts_to_combine = combo['cuts_to_combine']
-        else:
-            cuts_to_combine = None
+            
+            self.cuts_list = cuts_to_combine
             
         self.combine_cuts(sat_pass_threshold=combo['sat_pass_threshold'],
                           cut_name=combo['cut_name'],
-                          cuts_to_combine=cuts_to_combine,
                           lgc_diagnostics=lgc_diagnostics)
         if lgc_diagnostics:
             print("Done with cut combination")
