@@ -1016,7 +1016,7 @@ class Semiautocut:
         current_mask = self._get_cut_mask(ofamp_lims=ofamp_lims_arr, cut_pars=current_exception_pars, 
                                           lgcdiagnostics=lgcdiagnostics,
                                           include_previous_cuts=include_previous_cuts,
-                                          on_cut_bin =i + 1)
+                                          on_cut_bin =i)
         working_mask = working_mask | current_mask
         
         self.mask = working_mask
