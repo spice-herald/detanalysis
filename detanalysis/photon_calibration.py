@@ -40,6 +40,9 @@ class PhotonCalibration:
             String that's shorthand for the template model used.
             Currently supported models:
             
+                "onepulse": models the power domain template as
+                            one two pole pulse.
+            
                 "twopulse": models the power domain template as
                             the sum of two two pole pulses which
                             share the same rise time
@@ -1485,6 +1488,88 @@ class PhotonCalibration:
             
             
             
+    def _get_onepulse_t_template(self, amp_1, fall_1, rise,
+                                 t_arr=None, start_time=None, fs=1.25e6):
+        """
+        Calculates the time domain one pulse template fit to the photon
+        calibration data in the power domain.
+        
+        Parameters:
+        -----------
+        
+        amp_1 : float
+            The amplitude of the first pulse
+            
+        fall_1 : float
+            The fall time of the first pulse
+            
+        rise : float
+            The rise time of the pulse
+            
+        dt : float
+            The difference between the trigger time and the
+            true rise time of the calibration pulses.
+
+        t_arr : array, optional
+            If not None, used to generate the modeled template
+            at these times.
+
+        start_time : float, optional
+            If not None, used instead of the internal start time
+            for the start time for the pulse.
+        """
+
+        if t_arr is None:
+            t_arr = self.t_arr
+
+        if start_time is None:
+            start_time = self.pretrigger_window + self.dt
+        
+        pulse_1 = make_template_twopole(t_arr, A = 1.0, 
+                                        tau_r=rise, tau_f=fall_1,
+                                        t0=start_time,
+                                        fs=fs) * amp_1
+        
+        if np.isnan(pulse_1).any() or np.isinf(pulse_1).all():
+            pulse_1 = np.zeros(len(pulse_1), dtype = np.float64)
+        
+        return pulse_1
+    
+    def _get_onepulse_f_template(self, amp_1, fall_1, rise,
+                                 t_arr=None, start_time=None, fs=1.25e6):
+        """
+        Calculates the frequency domain two pulse template fit to the photon
+        calibration data in the power domain.
+        
+        Parameters:
+        -----------
+        
+        amp_1 : float
+            The amplitude of the pulse
+            
+        fall_1 : float
+            The fall time of the pulse
+            
+        rise : float
+            The rise time of the pulse
+            
+        dt : float
+            The difference between the trigger time and the
+            true rise time of the calibration pulses.
+
+        t_arr : array, optional
+            If not None, used to generate the modeled template
+            at these times.
+
+        start_time : float, optional
+            If not None, used instead of the internal start time
+            for the start time for the pulse.
+        """
+            
+        template_t = self._get_onepulse_t_template(amp_1, fall_1, rise, t_arr, start_time, fs=fs)
+        
+        return fft(template_t)/np.sqrt(len(template_t) * fs)
+    
     def _get_twopulse_t_template(self, amp_1, amp_2, fall_1, fall_2, rise,
                                  t_arr=None, start_time=None, fs=1.25e6):
         """
@@ -1937,7 +2022,11 @@ class PhotonCalibration:
         if fs is None:
             fs = self.fs
         
-        if self.template_model == 'twopulse':
+        if self.template_model == 'onepulse':
+            amp_1, fall_1, rise = params
+            model_template_f = self._get_onepulse_f_template(amp_1, fall_1, rise,
+                                                             t_arr, start_time, fs=fs)
+        elif self.template_model == 'twopulse':
             amp_1, amp_2, fall_1, fall_2, rise = params
             model_template_f = self._get_twopulse_f_template(amp_1, amp_2, fall_1, fall_2, rise,
                                                              t_arr, start_time, fs=fs)
@@ -1979,7 +2068,11 @@ class PhotonCalibration:
             for the start time for the pulse.
         """
         
-        if self.template_model == 'twopulse':
+        if self.template_model == 'onepulse':
+            amp_1, fall_1, rise = params
+            model_template_t = self._get_onepulse_t_template(amp_1, fall_1, rise, 
+                                                             t_arr, start_time)
+        elif self.template_model == 'twopulse':
             amp_1, amp_2, fall_1, fall_2, rise = params
             model_template_t = self._get_twopulse_t_template(amp_1, amp_2, fall_1, fall_2, rise, 
                                                              t_arr, start_time)
@@ -2012,7 +2105,28 @@ class PhotonCalibration:
             The number of the photon peak to print.
         """
         
-        if self.template_model == 'twopulse':
+        if self.template_model == 'onepulse':
+            popt = self.fit_vars_dict[photon_peak_number]
+            pcov = self.fit_cov_dict[photon_peak_number]
+            pstds = np.sqrt(np.diag(pcov))
+            
+            print("popt: ")
+            print(popt)
+            print(" ")
+
+            print("cov:")
+            print(pcov)
+            print(" ")
+            
+            amp_1, fall_1, rise = popt
+            amp_1_err, fall_1_err, rise_err = pstds
+            
+        
+            print("Amplitude 1: " + str(amp_1) + " +/- " + str(amp_1_err))
+            print("Fall Time 1: " + str(fall_1*1e6) + " +/- " + str(fall_1_err*1e6) + " us")
+            print("Rise Time: " + str(rise*1e6) + " +/- " + str(rise_err*1e6) + " us")
+            
+        elif self.template_model == 'twopulse':
             popt = self.fit_vars_dict[photon_peak_number]
             pcov = self.fit_cov_dict[photon_peak_number]
             pstds = np.sqrt(np.diag(pcov))
@@ -2546,7 +2660,9 @@ class PhotonCalibration:
                 j += 1
             i += 1
             
-        if self.template_model == 'twopulse':
+        if self.template_model == 'onepulse':
+            labels = ['Amp 1', "Fall 1", "Rise"]
+        elif self.template_model == 'twopulse':
             labels = ['Amp 1', 'Amp 2', "Fall 1", "Fall 2", "Rise"]
         elif self.template_model == 'threepulse':
             labels = ['Amp 1', 'Amp 2', 'Amp 3', "Fall 1", "Fall 2", 'Fall 3', "Rise"]
@@ -2595,7 +2711,16 @@ class PhotonCalibration:
             pcov = self.fit_cov_dict[photon_peak_number]
             pstds = np.sqrt(np.diag(pcov))
             
-            if self.template_model == 'twopulse':
+            if self.template_model == 'onepulse':
+                amp_1, fall_1, rise = popt
+                amp_1_err, fall_1_err, rise_err = pstds
+                
+                height_unscaled_list_element.append(amp_1)
+                height_unscaled_list_element.append(amp_1_err)
+                
+                headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err']
+            
+            elif self.template_model == 'twopulse':
                 amp_1, amp_2, fall_1, fall_2, rise = popt
                 amp_1_err, amp_2_err, fall_1_err, fall_2_err, rise_err = pstds
                 
@@ -2663,7 +2788,16 @@ class PhotonCalibration:
             pcov = self.fit_cov_dict[photon_peak_number]
             pstds = np.sqrt(np.diag(pcov))
             
-            if self.template_model == 'twopulse':
+            if self.template_model == 'onepulse':
+                amp_1, fall_1, rise = popt
+                amp_1_err, fall_1_err, rise_err = pstds
+                
+                height_scaled_list_element.append(amp_1/i)
+                height_scaled_list_element.append(amp_1_err/i)
+                
+                headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err']
+            
+            elif self.template_model == 'twopulse':
                 amp_1, amp_2, fall_1, fall_2, rise = popt
                 amp_1_err, amp_2_err, fall_1_err, fall_2_err, rise_err = pstds
                 
@@ -2733,7 +2867,18 @@ class PhotonCalibration:
             pcov = self.fit_cov_dict[photon_peak_number]
             pstds = np.sqrt(np.diag(pcov))
             
-            if self.template_model == 'twopulse':
+            if self.template_model == 'onepulse':
+                amp_1, fall_1, rise = popt
+                amp_1_err, fall_1_err, rise_err = pstds
+                
+                fall_times_list_element.append(fall_1*1e6)
+                fall_times_list_element.append(fall_1_err*1e6)
+                fall_times_list_element.append(rise*1e6)
+                fall_times_list_element.append(rise_err*1e6)
+                
+                headers_ = ['Photon Peak', 'Fall 1 (us)', 'Fall 1 Err (us)', 'Rise (us)', 'Rise Err (us)']
+            
+            elif self.template_model == 'twopulse':
                 amp_1, amp_2, fall_1, fall_2, rise = popt
                 amp_1_err, amp_2_err, fall_1_err, fall_2_err, rise_err = pstds
                 
