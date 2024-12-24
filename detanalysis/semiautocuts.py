@@ -641,12 +641,11 @@ class Semiautocut:
                 
         #percentile based cuts
         elif ('percent_upper' in cut_pars):
-            value_upper = self.df.percentile_approx(self.cut_rq, cut_pars['percent_upper']*100,
-                                                    selection=True)
+            values = self.df[self.cut_rq].values
+            value_upper = np.percentile(values, cut_pars['percent_upper']*100)
             self.values_upper[on_cut_bin] = value_upper
             if ('percent_lower' in cut_pars):
-                value_lower = self.df.percentile_approx(self.cut_rq, cut_pars['percent_lower']*100,     
-                                                        selection=True)
+                value_lower = np.percentile(values, cut_pars['percent_lower']*100)
                     
                 bool_arr_lower = self.df[self.cut_rq].values > value_lower
                 bool_arr_upper = self.df[self.cut_rq].values < value_upper
@@ -657,16 +656,18 @@ class Semiautocut:
             else:
                 cut_mask = self.df[self.cut_rq].values < value_upper
         elif ('percent_lower' in cut_pars):
-            value_lower = self.df.percentile_approx(self.cut_rq, cut_pars['percent_lower']*100, 
-                                                    selection=True)
+            values = self.df[self.cut_rq].values
+            value_lower = np.percentile(values, cut_pars['percent_lower']*100)
+            
             self.values_lower[on_cut_bin] = value_lower
             cut_mask = self.df[self.cut_rq].values > value_lower
         elif ('percent' in cut_pars):
             percent_lower = 0.5 - 0.5 * cut_pars['percent']
             percent_upper = 0.5 + 0.5 * cut_pars['percent']
             
-            value_lower = self.df.percentile_approx(self.cut_rq, percent_lower*100, selection=True)
-            value_upper = self.df.percentile_approx(self.cut_rq, percent_upper*100, selection=True)
+            values = self.df[self.cut_rq].values
+            value_lower = np.percentile(values, percent_lower*100)
+            value_upper = np.percentile(values, percent_upper*100)
             
             self.values_lower[on_cut_bin] = value_lower
             self.values_upper[on_cut_bin] = value_upper
@@ -680,9 +681,10 @@ class Semiautocut:
         #sigma based cuts
         elif ('sigma_upper' in cut_pars):
             #for sigma calculations, if we need them
-            median = self.df.percentile_approx(self.cut_rq, 50, selection=True)
-            sigma = np.mean([self.df.percentile_approx(self.cut_rq, 50 - 68.27/2.0, selection=True) - median, 
-                            median - self.df.percentile_approx(self.cut_rq, 50 + 68.27/2.0, selection=True)])
+            values = self.df[self.cut_rq].values
+            median = np.percentile(values, 50)
+            sigma = np.mean([np.percentile(values, 50 - 68.27/2.0) - median, 
+                            median - np.percentile(values, 50 + 68.27/2.0)])
             sigma = np.abs(sigma)
             
             value_upper = median + sigma * self.cut_pars['sigma_upper']
@@ -702,9 +704,10 @@ class Semiautocut:
                 
         elif ('sigma_lower' in cut_pars):
             #for sigma calculations, if we need them
-            median = self.df.percentile_approx(self.cut_rq, 50, selection=True)
-            sigma = np.mean([self.df.percentile_approx(self.cut_rq, 50 - 68.27/2.0, selection=True) - median, 
-                            median - self.df.percentile_approx(self.cut_rq, 50 + 68.27/2.0, selection=True)])
+            values = self.df[self.cut_rq].values
+            median = np.percentile(values, 50)
+            sigma = np.mean([np.percentile(values, 50 - 68.27/2.0) - median, 
+                            median - np.percentile(values, 50 + 68.27/2.0)])
             sigma = np.abs(sigma)
             
             value_lower = median + sigma * cut_pars['sigma_lower']
@@ -713,9 +716,10 @@ class Semiautocut:
             
         elif('sigma' in cut_pars):
             #for sigma calculations, if we need them
-            median = self.df.percentile_approx(self.cut_rq, 50, selection=True)
-            sigma = np.mean([self.df.percentile_approx(self.cut_rq, 50 - 68.27/2.0, selection=True) - median, 
-                            median - self.df.percentile_approx(self.cut_rq, 50 + 68.27/2.0, selection=True)])
+            values = self.df[self.cut_rq].values
+            median = np.percentile(values, 50)
+            sigma = np.mean([np.percentile(values, 50 - 68.27/2.0) - median, 
+                            median - np.percentile(values, 50 + 68.27/2.0)])
             sigma = np.abs(sigma)
             
             value_upper = median + sigma * cut_pars['sigma']
@@ -1144,17 +1148,21 @@ class Semiautocut:
             center_val_y = (0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr)) - min_val)*v0*1e15
             delta_y = (max(self.value_upper_arr) - min(self.value_lower_arr))*v0*1e15
         
+        time_vals = (self.df.event_time.values)/time_norm
+        time_min = min(time_vals)
+        time_max = max(time_vals)
+        
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap((self.df.event_time)/time_norm, plot_var, colormap = cmap,
-                            limits=['minmax', [center_val_y - delta_y, center_val_y + delta_y]], 
+                            limits=[[time_min, time_max], [center_val_y - delta_y, center_val_y + delta_y]], 
                             f='log', colorbar_label = "log(number/bin), All Events")
                             
         cmap = copy(mpl.cm.get_cmap('spring') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap((self.df.event_time)/time_norm, plot_var, colormap = cmap,
                             f='log', selection=cut_names,
-                            limits=['minmax', [center_val_y - delta_y, center_val_y + delta_y]], 
+                            limits=[[time_min, time_max], [center_val_y - delta_y, center_val_y + delta_y]], 
                              colorbar_label = "log(number/bin), Passing Cuts")
                            
         plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + " vs. Time \n " + 
@@ -1278,16 +1286,20 @@ class Semiautocut:
         center_val_y = 0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr))
         delta_y = max(self.value_upper_arr) - min(self.value_lower_arr)
         
+        ofamp_vals = self.df[self.ofamp_rq].values
+        ofamp_min = min(ofamp_vals)
+        ofamp_max = max(ofamp_vals)
+        
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.cut_rq], colormap = cmap,
-                            limits=['minmax', [center_val_y - delta_y, center_val_y + delta_y]], 
+                            limits=[[ofamp_min, ofamp_max], [center_val_y - delta_y, center_val_y + delta_y]], 
                             f='log', colorbar_label = "log(number/bin), All Events")
                             
         cmap = copy(mpl.cm.get_cmap('spring') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
         self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.cut_rq], colormap = cmap,
-                            limits=['minmax', [center_val_y - delta_y, center_val_y + delta_y]], 
+                            limits=[[ofamp_min, ofamp_max], [center_val_y - delta_y, center_val_y + delta_y]], 
                             f='log', selection=cut_names,
                             colorbar_label = "log(number/bin), Passing Cuts")
                            
@@ -1404,12 +1416,18 @@ class Semiautocut:
         #    i += 1
         
         if ylims is None:
-            ylims_ = 'minmax'
+            yvals = self.df[self.chi2_rq].values
+            yvals_min = min(yvals)
+            yvals_max = max(yvals)
+            ylims_ = [yvals_min, yvals_max]
         else:
             ylims_ = ylims
         
         if xlims is None:
-            xlims_ = 'minmax'
+            xvals = self.df[self.ofamp_rq].values
+            xvals_min = min(xvals)
+            xvals_max = max(xvals)
+            xlims_ = [xvals_min, xvals_max]
         else:
             xlims_ = xlims
             
