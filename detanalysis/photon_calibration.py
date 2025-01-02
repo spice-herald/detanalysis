@@ -4,6 +4,7 @@ import random
 from scipy.optimize import least_squares
 import matplotlib.pyplot as plt
 from tabulate import tabulate
+import copy
 
 from qetpy.core.didv._uncertainties_didv import get_power_noise_with_uncertainties, get_dPdI_with_uncertainties
 from qetpy.core import calc_psd
@@ -467,10 +468,11 @@ class PhotonCalibration:
                            1.5*guess[9], 1.5*guess[10], 1.25*guess[11],
                            1.5*guess[12], 1.5*guess[13], 1.25*guess[14]]]
             
-            
+         
         event_heights = self.calibration_df[self.calibration_df[cut_rq]][amp_rq].values
         if lgc_diagnostics:
             print("Event heights: " + str(event_heights))
+            print("Number of events: " + str(len(event_heights)))
             print(" ")
         
         spectrum_vals, spectrum_bins = np.histogram(event_heights, bins)
@@ -2934,7 +2936,18 @@ class PhotonCalibration:
         print(tabulate(fall_times_list, headers = headers_))
         
         
-                
+    def get_save_obj(self):
+        """
+        Returns a lightweight saveable object that can be easily pickled and saved.
+        """
+        
+        saveobj = copy.deepcopy(self)
+        
+        saveobj.analyzer_object = None
+        saveobj.calibration_df = None
+        saveobj.photon_traces_dict = None
+        
+        return saveobj
                 
             
             
