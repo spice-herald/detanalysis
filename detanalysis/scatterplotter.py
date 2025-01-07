@@ -76,8 +76,9 @@ class ScatterPlotter:
         selection : vaex selection string, optional
             Vaex selection string for the displayed data.
         """
-        self.df = df
+        #self.df = df
         self.path_to_data = path_to_data
+        self.picked_index_arr = []
         self.picked_inds = []
         
         self.rq_1 = rq_1
@@ -93,12 +94,20 @@ class ScatterPlotter:
         
         self.selection = selection
         
+        if selection is not None:
+            self.df = df[df[selection]]
+        else:
+            self.df = df
+            
+        self.index = self.df.index.values
+        
     def _onpick(self, event):
         """
         Used as the matplotlib picker function
         """
         ind = np.asarray(event.ind)[0]
         self.picked_inds.append(ind)
+        self.picked_index_arr.append(self.index[ind])
         
     def _get_trace(self, df_index,
                    trace_length_msec=None,
@@ -182,7 +191,7 @@ class ScatterPlotter:
             
     
         # get trace
-        trace  = h5.read_single_event(
+        trace = h5.read_single_event(
             event_index=event_index,
             file_name=file_name,
             trigger_index=trigger_index,
@@ -194,6 +203,11 @@ class ScatterPlotter:
     
         
     def plot_picking_scatter(self):
+    
+        if len(self.picked_inds) != len(self.picked_index_arr):
+            self.picked_inds = []
+            self.picked_index_arr = []
+        
         mpl.rcParams['figure.figsize'] = [8, 5.5]
         fig, ax = plt.subplots()
         
@@ -204,15 +218,6 @@ class ScatterPlotter:
                     s = 3, picker = True, pickradius = 5,
                     )
         
-        if self.selection is not None:
-            vals1 = self.df[self.selection][self.rq_1].values
-            vals2 = self.df[self.selection][self.rq_2].values
-            
-            ax.scatter(vals1,
-                        vals2, 
-                        s = 3, color = 'C1', label = "Selected Events"
-                        )
-            ax.legend()
         ax.set_xlabel(self.label_1)
         ax.set_ylabel(self.label_2)
         
@@ -229,23 +234,21 @@ class ScatterPlotter:
         mpl.rcParams['figure.figsize'] = [6, 9]
         
         i = 0
-        while i < len(self.picked_inds):
+        while i < len(self.picked_index_arr):
             fig, axs = plt.subplots(2)
             fig.subplots_adjust(hspace=0.5)
             
+            
             vals1 = self.df[self.rq_1].values
             vals2 = self.df[self.rq_2].values
-            if self.selection is not None:
-                vals1 = self.df[self.selection][self.rq_1].values
-                vals2 = self.df[self.selection][self.rq_2].values
             
             axs[0].scatter(vals1,
                         vals2, 
                         s = 3, picker = True, pickradius = 5,
                         )
             
-            axs[0].scatter(self.df[self.rq_1].values[self.picked_inds[i]],
-                       self.df[self.rq_2].values[self.picked_inds[i]],
+            axs[0].scatter(vals1[self.picked_inds[i]],
+                       vals2[self.picked_inds[i]],
                       label = "Picked Point", marker = "*")
             
             axs[0].set_xlabel(self.label_1)
@@ -256,7 +259,7 @@ class ScatterPlotter:
                 axs[0].set_title(self.title)
 
             retrived_traces = self._get_trace(
-                self.picked_inds[i],
+                self.picked_index_arr[i],
                 trace_length_msec=trace_length_msec,
                 pretrigger_length_msec=pretrigger_length_msec)
             
@@ -277,7 +280,7 @@ class ScatterPlotter:
                         trace_to_plot = qp.utils.lowpassfilter(retrived_traces[j], lpcutoff,
                                                                fs=self.fs)
                         
-                    axs[1].plot(t_arr, trace_to_plot, label=label_)
+                    axs[1].plot(t_arr*1e3 - pretrigger_length_msec, trace_to_plot, label=label_)
                     j += 1
             else:
                 j = 0
@@ -294,14 +297,15 @@ class ScatterPlotter:
                                                                lpcutoff,
                                                                fs=self.fs)
                         
-                    axs[1].plot(t_arr, trace_to_plot, label=label_)
+                    axs[1].plot(t_arr*1e3 - pretrigger_length_msec, trace_to_plot, label=label_)
                     j += 1
                     
-            axs[1].set_xlabel("Time (s)")
+            axs[1].set_xlabel("Time Since Trigger (ms)")
             axs[1].set_ylabel("Trace Amplitude (amps)")
+            axs[1].grid()
             axs[1].legend()
             
-            title_str = "Event " + str(self.picked_inds[i]) + ", \n" + str(self.label_1) + ": " 
+            title_str = "Event " + str(self.picked_index_arr[i]) + ", \n" + str(self.label_1) + ": " 
             title_str += str(self.df[self.rq_1].values[self.picked_inds[i]]) + ", \n"
             title_str += str(self.label_2) + ": " 
             title_str += str(self.df[self.rq_2].values[self.picked_inds[i]]) + ", "

@@ -1030,7 +1030,9 @@ class Semiautocut:
             
     #plotting functions
     def plot_vs_time(self, lgchours=False, lgcdiagnostics=False,
-                     include_previous_cuts=False, v0=0.0):
+                     include_previous_cuts=False, v0=0.0,
+                     xlabel=None, ylabel=None, xlim=None, ylim=None, title=None, 
+                     time_since_start=False):
         """
         Plots RQ vs. time, showing data that passed and failed cut
         
@@ -1053,7 +1055,37 @@ class Semiautocut:
         v0 : float, optional
             Used with the baseline, to construct an estimated baseline
             power in the channel.
+            
+        xlabel : string, optional
+            If not None, is used as the x axis label.
+            
+        ylabel : string, optional
+            If not None, is used as the y axis label.
+            
+        xlim : array, optional:
+            If not None, passed to plt.xlim as the x limits of
+            the plot.
+            
+        ylim : array, optional:
+            If not None, passed to plt.ylim as the y limits of
+            the plot.
+            
+        title : string, optional
+            If not None, used as the title.
+            
+        time_since_start : bool, optional
+            If True, takes the start of the datataking as
+            time = zero.
+            
+            
         """
+        
+        time_dif = 0.0
+        if time_since_start:
+            if lgchours:
+                time_dif = min(self.df.event_time.values)/(60.0*60.0)
+            else:
+                time_dif = min(self.df.event_time.values)
             
         time_norm=1.0
         if lgchours:
@@ -1093,13 +1125,13 @@ class Semiautocut:
         #plot all events
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
-        self.df.viz.heatmap((self.df.event_time)/time_norm, plot_var, colormap = cmap,
+        self.df.viz.heatmap((self.df.event_time)/time_norm - time_dif, plot_var, colormap = cmap,
                             f='log', colorbar_label = "log(number/bin), All Events")
                                 
         #plot events passing cuts
         cmap = copy(mpl.cm.get_cmap('spring') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
-        self.df.viz.heatmap((self.df.event_time)/time_norm, plot_var, colormap = cmap,
+        self.df.viz.heatmap((self.df.event_time)/time_norm - time_dif, plot_var, colormap = cmap,
                            f='log', selection=cut_names, colorbar_label = "log(number/bin), Passing Cuts")
                            
         #plot horizontal lines for cut limits                   
@@ -1117,7 +1149,7 @@ class Semiautocut:
                     hval_high = (float(self.value_upper_arr[i]) - min_val) * v0 * 1e15
                     
                 plt.hlines([hval_low, hval_high],
-                            float(time_limits_arr[i])/time_norm, float(time_limits_arr[i + 1])/time_norm)
+                            float(time_limits_arr[i])/time_norm - time_dif, float(time_limits_arr[i + 1])/time_norm - time_dif)
             else:
                 
                 if v0 == 0.0:
@@ -1128,16 +1160,30 @@ class Semiautocut:
                     hval_high = (float(self.value_upper_arr[i]) - min_val) * v0 * 1e15
                     
                 plt.hlines([hval_low, hval_high],
-                            min(self.df.event_time.values)/time_norm, max(self.df.event_time.values)/time_norm)
+                            min(self.df.event_time.values)/time_norm - time_dif, max(self.df.event_time.values)/time_norm - time_dif)
             i += 1
-                           
-        plt.title("Cut: " + str(self.cut_name) + ", \n " + str(self.cut_rq) + " vs. Time")
+        
+        if title is None:                  
+            plt.title("Cut: " + str(self.cut_name) + ", \n " + str(self.cut_rq) + " vs. Time")
+        else:
+            plt.title(title)
+        
         if lgchours:
             plt.xlabel("event_time (hours)")
         else:
             plt.xlabel("event_time (seconds)")
         if v0:
             plt.ylabel("Baseline Rescaled to Power Units,\nBaseline Subtracted (fW)")
+        
+        if xlabel is not None:
+            plt.xlabel(xlabel)
+        if ylabel is not None:
+            plt.ylabel(ylabel)
+        if xlim is not None:
+            plt.xlim(xlim)
+        if ylim is not None:
+            plt.xlim(ylim)
+        
         plt.show()
         
         #plot zoomed in around cuts
@@ -1154,19 +1200,23 @@ class Semiautocut:
         
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
-        self.df.viz.heatmap((self.df.event_time)/time_norm, plot_var, colormap = cmap,
-                            limits=[[time_min, time_max], [center_val_y - delta_y, center_val_y + delta_y]], 
+        self.df.viz.heatmap((self.df.event_time)/time_norm - time_dif, plot_var, colormap = cmap,
+                            limits=[[time_min - time_dif, time_max - time_dif], [center_val_y - delta_y, center_val_y + delta_y]], 
                             f='log', colorbar_label = "log(number/bin), All Events")
                             
         cmap = copy(mpl.cm.get_cmap('spring') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
-        self.df.viz.heatmap((self.df.event_time)/time_norm, plot_var, colormap = cmap,
+        self.df.viz.heatmap((self.df.event_time)/time_norm - time_dif, plot_var, colormap = cmap,
                             f='log', selection=cut_names,
-                            limits=[[time_min, time_max], [center_val_y - delta_y, center_val_y + delta_y]], 
+                            limits=[[time_min - time_dif, time_max - time_dif], [center_val_y - delta_y, center_val_y + delta_y]], 
                              colorbar_label = "log(number/bin), Passing Cuts")
-                           
-        plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + " vs. Time \n " + 
-                  " Zoomed In")
+        
+        if title is None:                   
+            plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + " vs. Time \n " + 
+                    " Zoomed In")
+        else:
+            plt.title(title)
+            
         if lgchours:
             plt.xlabel("event_time (hours)")
         else:
@@ -1187,7 +1237,7 @@ class Semiautocut:
                     hval_high = (float(self.value_upper_arr[i]) - min_val) * v0 * 1e15
                     
                 plt.hlines([hval_low, hval_high],
-                            float(time_limits_arr[i])/time_norm, float(time_limits_arr[i + 1])/time_norm)
+                            float(time_limits_arr[i])/time_norm - time_dif, float(time_limits_arr[i + 1])/time_norm - time_dif)
             else:
                 
                 if v0 == 0.0:
@@ -1198,7 +1248,7 @@ class Semiautocut:
                     hval_high = (float(self.value_upper_arr[i]) - min_val) * v0 * 1e15
                     
                 plt.hlines([hval_low, hval_high],
-                            min(self.df.event_time.values)/time_norm, max(self.df.event_time.values)/time_norm)
+                            min(self.df.event_time.values)/time_norm - time_dif, max(self.df.event_time.values)/time_norm - time_dif)
             i += 1
             
         if v0 == 0.0:
@@ -1207,11 +1257,21 @@ class Semiautocut:
             plt.ylim(center_val_y - delta_y, center_val_y + delta_y)
             plt.ylabel("Baseline Rescaled to Power Units,\nBaseline Subtracted (fW)")
             
-            
+        if xlabel is not None:
+            plt.xlabel(xlabel)
+        if ylabel is not None:
+            plt.ylabel(ylabel)
+        if xlim is not None:
+            plt.xlim(xlim)
+        if ylim is not None:
+            plt.xlim(ylim)
+        
         plt.show()
         
             
-    def plot_vs_ofamp(self, lgcdiagnostics=False, include_previous_cuts=False):
+    def plot_vs_ofamp(self, lgcdiagnostics=False, include_previous_cuts=False, 
+                      xlabel=None, ylabel=None, xlim=None, ylim=None, title=None,
+                      ofamp_to_ev=1.0):
         """
         Plots RQ vs. ofamp, showing data that passed and failed cut
         
@@ -1226,6 +1286,27 @@ class Semiautocut:
             cuts. If True, includes all cuts in the dataframe with an RQ
             including "cut_" and the channel name. If an array, includes
             all cut RQs in the array.
+            
+        xlabel : string, optional
+            If not None, is used as the x axis label.
+            
+        ylabel : string, optional
+            If not None, is used as the y axis label.
+            
+        xlim : array, optional
+            If not None, passed to plt.xlim as the x limits of
+            the plot.
+            
+        ylim : array, optional
+            If not None, passed to plt.ylim as the y limits of
+            the plot.
+            
+        title : string, optional
+            If not None, used as the title.
+            
+        ofamp_to_ev : float, optional
+            The conversion factor between ofamp units and energy units.
+            Defaults to 1, so we just plot in ofamp units.
         """
         
         #figures out what cuts to include in the "with cuts" plot
@@ -1258,13 +1339,13 @@ class Semiautocut:
         #plot all events
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
-        self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.cut_rq], colormap = cmap,
+        self.df.viz.heatmap(self.df[self.ofamp_rq]*ofamp_to_ev, self.df[self.cut_rq], colormap = cmap,
                             f='log', colorbar_label = "log(number/bin), All Events")
                                 
         #plot events passing cuts
         cmap = copy(mpl.cm.get_cmap('spring') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
-        self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.cut_rq], colormap = cmap,
+        self.df.viz.heatmap(self.df[self.ofamp_rq]*ofamp_to_ev, self.df[self.cut_rq], colormap = cmap,
                            f='log', selection=cut_names,
                             colorbar_label = "log(number/bin), Passing Cuts")
                             
@@ -1275,10 +1356,13 @@ class Semiautocut:
                 ofamp_limits_arr = np.asarray(self.ofamp_bins_arr).tolist()
                 ofamp_limits_arr.append(max(self.df[self.ofamp_rq].values))
                 plt.hlines([self.value_lower_arr[i], self.value_upper_arr[i]],
-                            ofamp_limits_arr[i], ofamp_limits_arr[i + 1])
+                            ofamp_limits_arr[i]*ofamp_to_ev, ofamp_limits_arr[i + 1]*ofamp_to_ev)
             i += 1
-                           
-        plt.title("Cut: " + str(self.cut_name) + ", \n " + str(self.cut_rq) + " vs. OFAmp")
+        
+        if title is None:               
+            plt.title("Cut: " + str(self.cut_name) + ", \n " + str(self.cut_rq) + " vs. OFAmp")
+        else:
+            plt.title(title)
         plt.show()
         
         
@@ -1292,19 +1376,22 @@ class Semiautocut:
         
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
-        self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.cut_rq], colormap = cmap,
-                            limits=[[ofamp_min, ofamp_max], [center_val_y - delta_y, center_val_y + delta_y]], 
+        self.df.viz.heatmap(self.df[self.ofamp_rq]*ofamp_to_ev, self.df[self.cut_rq], colormap = cmap,
+                            limits=[[ofamp_min*ofamp_to_ev, ofamp_max*ofamp_to_ev], [center_val_y - delta_y, center_val_y + delta_y]], 
                             f='log', colorbar_label = "log(number/bin), All Events")
                             
         cmap = copy(mpl.cm.get_cmap('spring') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
-        self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.cut_rq], colormap = cmap,
-                            limits=[[ofamp_min, ofamp_max], [center_val_y - delta_y, center_val_y + delta_y]], 
+        self.df.viz.heatmap(self.df[self.ofamp_rq]*ofamp_to_ev, self.df[self.cut_rq], colormap = cmap,
+                            limits=[[ofamp_min*ofamp_to_ev, ofamp_max*ofamp_to_ev], [center_val_y - delta_y, center_val_y + delta_y]], 
                             f='log', selection=cut_names,
                             colorbar_label = "log(number/bin), Passing Cuts")
-                           
-        plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + 
-                  " vs. " + str(self.ofamp_rq) + " \n Zoomed In")
+        
+        if title is None:                   
+            plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + 
+                    " vs. " + str(self.ofamp_rq) + " \n Zoomed In")
+        else:
+            plt.title(title)
             
         plt.ylim(center_val_y - delta_y, center_val_y + delta_y)
         
@@ -1318,6 +1405,15 @@ class Semiautocut:
                             ofamp_limits_arr[i], ofamp_limits_arr[i + 1])
             i += 1
             
+        if xlabel is not None:
+            plt.xlabel(xlabel)
+        if ylabel is not None:
+            plt.ylabel(ylabel)
+        if xlim is not None:
+            plt.xlim(xlim*ofamp_to_ev)
+        if ylim is not None:
+            plt.ylim(ylim)
+        
         plt.show()
         
         #plot zoomed in around cuts and 10% to 90% of OFAmp
@@ -1328,19 +1424,22 @@ class Semiautocut:
         
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
-        self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.cut_rq], colormap = cmap,
-                            limits=[[tenpc_ofamp, nintypc_ofamp], [center_val_y - delta_y, center_val_y + delta_y]], 
+        self.df.viz.heatmap(self.df[self.ofamp_rq]*ofamp_to_ev, self.df[self.cut_rq], colormap = cmap,
+                            limits=[[tenpc_ofamp*ofamp_to_ev, nintypc_ofamp*ofamp_to_ev], [center_val_y - delta_y, center_val_y + delta_y]], 
                             f='log', colorbar_label = "log(number/bin), All Events")
                             
         cmap = copy(mpl.cm.get_cmap('spring') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
-        self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.cut_rq], colormap = cmap,
-                            limits=[[tenpc_ofamp, nintypc_ofamp], [center_val_y - delta_y, center_val_y + delta_y]], 
+        self.df.viz.heatmap(self.df[self.ofamp_rq]*ofamp_to_ev, self.df[self.cut_rq], colormap = cmap,
+                            limits=[[tenpc_ofamp*ofamp_to_ev, nintypc_ofamp*ofamp_to_ev], [center_val_y - delta_y, center_val_y + delta_y]], 
                             f='log', selection=cut_names,
                             colorbar_label = "log(number/bin), Passing Cuts")
-                           
-        plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + 
-                  " vs. " + str(self.ofamp_rq) + " \n Zoomed In, 1% to 99% OFAmp")
+        
+        if title is None:                
+            plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + 
+                    " vs. " + str(self.ofamp_rq) + " \n Zoomed In, 1% to 99% OFAmp")
+        else:
+            plt.title(title)
             
         plt.ylim(center_val_y - delta_y, center_val_y + delta_y)
         
@@ -1354,12 +1453,22 @@ class Semiautocut:
                             ofamp_limits_arr[i], ofamp_limits_arr[i + 1])
             i += 1
             
+        if xlabel is not None:
+            plt.xlabel(xlabel)
+        if ylabel is not None:
+            plt.ylabel(ylabel)
+        if xlim is not None:
+            plt.xlim(xlim*ofamp_to_ev)
+        if ylim is not None:
+            plt.ylim(ylim)
+        
         plt.show()
         
             
     def plot_chi2_vs_ofamp(self, lgcdiagnostics=False, include_previous_cuts=False,
-                           ylims=None, xlims=None,
-                           chi2_mean=0.0, chi2_std=0.0):
+                           xlabel=None, ylabel=None, xlim=None, ylim=None, title=None, 
+                           chi2_mean=0.0, chi2_std=0.0, ofamp_to_ev=1.0,
+                           selection_cut=None):
         """
         Shows events passing and failing cut on ofamp vs. chi2 plot
         
@@ -1374,18 +1483,38 @@ class Semiautocut:
             cuts. If True, includes all cuts in the dataframe with an RQ
             including "cut_" and the channel name. If an array, includes
             all cut RQs in the array.
-
-        ylims : array, optional
-            If not None, the limits for the y axis in the displayed plot.
             
-        xlims : array, optional
-            If not None, the limits for the y axis in the displayed plot.
+        xlabel : string, optional
+            If not None, is used as the x axis label.
+            
+        ylabel : string, optional
+            If not None, is used as the y axis label.
+            
+        xlim : array, optional:
+            If not None, passed to plt.xlim as the x limits of
+            the plot.
+            
+        ylim : array, optional:
+            If not None, passed to plt.ylim as the y limits of
+            the plot.
+            
+        title : string, optional
+            If not None, used as the title.
             
         chi2_mean : float, optional
             If not zero, used to plot the mean chi2 value
             
         chi2_std : float, optional
             If not zero, used to plot the bands for expected chi2s
+            
+        ofamp_to_ev : float, optional
+            The conversion factor between ofamp units and energy units.
+            Defaults to 1, so we just plot in ofamp units.
+            
+        selection_cut : string, optional
+            If not None, the name of the cut used to define a selection. For example,
+            we could define df['cut_left'] =  (df.trigger_channel == "Mv3025pcBigFinsSum")
+            and then set selection_cut = 'cut_left'
         """
         
         #figures out what cuts to include in the "with cuts" plot
@@ -1407,6 +1536,9 @@ class Semiautocut:
             print("Cut names to include in with cuts plot: ")
             print(str(cut_names))
         
+        if selection_cut is not None:
+            cut_names.append(selection_cut)
+        
         #reset selection 
         self.df['_trues'] = np.ones(len(self.df), dtype='bool')
         self.df.select('_trues', mode='replace')
@@ -1415,35 +1547,40 @@ class Semiautocut:
         #    self.df.select(cut_names[i], mode='and')
         #    i += 1
         
-        if ylims is None:
+        if ylim is None:
             yvals = self.df[self.chi2_rq].values
             yvals_min = min(yvals)
             yvals_max = max(yvals)
-            ylims_ = [yvals_min, yvals_max]
+            ylim_ = np.asarray([yvals_min, yvals_max])
         else:
-            ylims_ = ylims
+            ylim_ = np.asarray(ylim)
         
-        if xlims is None:
+        if xlim is None:
             xvals = self.df[self.ofamp_rq].values
             xvals_min = min(xvals)
             xvals_max = max(xvals)
-            xlims_ = [xvals_min, xvals_max]
+            xlim_ = np.asarray([xvals_min, xvals_max])
         else:
-            xlims_ = xlims
+            xlim_ = np.asarray(xlim)
             
         #plot all events
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
-        self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.chi2_rq], colormap = cmap,
-                            limits = [xlims_, ylims_], 
+        self.df.viz.heatmap(self.df[self.ofamp_rq]*ofamp_to_ev, self.df[self.chi2_rq], colormap = cmap,
+                            limits = [xlim_*ofamp_to_ev, ylim_], 
+                            selection=[selection_cut], 
                             f='log', colorbar_label = "log(number/bin), All Events")
-                                
+        
+        if selection_cut is not None:
+            filtered_df = self.df[self.df[selection_cut] & self.df[self.cut_name]] 
+        else:
+            filtered_df = self.df[self.df[self.cut_name]]
         #plot events passing cuts
         cmap = copy(mpl.cm.get_cmap('spring') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
-        self.df.viz.heatmap(self.df[self.ofamp_rq], self.df[self.chi2_rq], colormap = cmap,
-                           f='log', selection=cut_names,
-                            limits = [xlims_, ylims_], 
+        filtered_df.viz.heatmap(self.df[self.ofamp_rq]*ofamp_to_ev, self.df[self.chi2_rq], colormap = cmap,
+                           f='log', #selection=cut_names,
+                            limits = [xlim_*ofamp_to_ev, ylim_], 
                             colorbar_label = "log(number/bin), Passing Cuts")
                             
         
@@ -1459,7 +1596,7 @@ class Semiautocut:
                     label_ = None
                 if 'chi2' in str(self.cut_rq):
                     plt.hlines([self.value_lower_arr[i], self.value_upper_arr[i]],
-                                ofamp_limits_arr[i], ofamp_limits_arr[i + 1],
+                                ofamp_limits_arr[i]*ofamp_to_ev, ofamp_limits_arr[i + 1]*ofamp_to_ev,
                                 label = label_)
             i += 1
             
@@ -1469,19 +1606,29 @@ class Semiautocut:
                        
             if chi2_std != 0.0:
                 plt.hlines([chi2_mean + 2 * chi2_std, chi2_mean - 2 * chi2_std],
-                           min(ofamp_limits_arr) , max(ofamp_limits_arr),
+                           min(ofamp_limits_arr)*ofamp_to_ev , max(ofamp_limits_arr)*ofamp_to_ev,
                            color= 'black', linestyle = 'dashed', label = r"$\pm 2 \sigma$")
                 plt.hlines([chi2_mean + 5 * chi2_std, chi2_mean - 5 * chi2_std],
-                           min(ofamp_limits_arr) , max(ofamp_limits_arr),
+                           min(ofamp_limits_arr)*ofamp_to_ev , max(ofamp_limits_arr)*ofamp_to_ev,
                            color= 'black', linestyle = 'dotted', label = r"$\pm 5 \sigma$")
                          
                            
-        plt.title("Cuts: " + str(cut_names) + ", \n OFAmp vs. Chi2")
-        if ylims is not None:
-            plt.ylim(ylims_[0], ylims_[1])
-        if xlims is not None:
-            plt.xlim(xlims_[0], xlims_[1])
+        if title is None:
+            plt.title("Cuts: " + str(cut_names) + ", \n OFAmp vs. Chi2")
+        else:
+            plt.title(title)
+            
+        if ylim is not None:
+            plt.ylim(ylim_[0], ylim_[1])
+        if xlim is not None:
+            plt.xlim(xlim_[0]*ofamp_to_ev, xlim_[1]*ofamp_to_ev)
         plt.legend()
+        
+        if xlabel is not None:
+            plt.xlabel(xlabel)
+        if ylabel is not None:
+            plt.ylabel(ylabel)
+        
         plt.show()
             
     def plot_histograms(self, lgcdiagnostics=False, include_previous_cuts=False,
