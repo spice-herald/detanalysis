@@ -586,16 +586,16 @@ class Semiautocut:
             cut_names = copy(include_previous_cuts)
         else:
             cut_names = []
-            
+        
         
             
         self.df['_lims_mask'] = lims_mask
         cut_names.append('_lims_mask')
-        
+
         #reset selection 
         self.df['_trues'] = np.ones(len(self.df), dtype = 'bool')
         self.df.select('_trues', mode='replace')
-        
+
         #select the cuts in cut_names
         i = 0
         while i < len(cut_names):
@@ -641,7 +641,8 @@ class Semiautocut:
                 
         #percentile based cuts
         elif ('percent_upper' in cut_pars):
-            values = self.df[self.cut_rq].values
+            # values = self.df[self.cut_rq].values
+            values = self.df.evaluate(self.cut_rq, selection = True)
             value_upper = np.percentile(values, cut_pars['percent_upper']*100)
             self.values_upper[on_cut_bin] = value_upper
             if ('percent_lower' in cut_pars):
@@ -656,16 +657,15 @@ class Semiautocut:
             else:
                 cut_mask = self.df[self.cut_rq].values < value_upper
         elif ('percent_lower' in cut_pars):
-            values = self.df[self.cut_rq].values
+            values = self.df.evaluate(self.cut_rq, selection = True)
             value_lower = np.percentile(values, cut_pars['percent_lower']*100)
-            
             self.values_lower[on_cut_bin] = value_lower
             cut_mask = self.df[self.cut_rq].values > value_lower
         elif ('percent' in cut_pars):
             percent_lower = 0.5 - 0.5 * cut_pars['percent']
             percent_upper = 0.5 + 0.5 * cut_pars['percent']
             
-            values = self.df[self.cut_rq].values
+            values = self.df.evaluate(self.cut_rq, selection = True)
             value_lower = np.percentile(values, percent_lower*100)
             value_upper = np.percentile(values, percent_upper*100)
             
@@ -681,7 +681,7 @@ class Semiautocut:
         #sigma based cuts
         elif ('sigma_upper' in cut_pars):
             #for sigma calculations, if we need them
-            values = self.df[self.cut_rq].values
+            values = self.df.evaluate(self.cut_rq, selection = True)
             median = np.percentile(values, 50)
             sigma = np.mean([np.percentile(values, 50 - 68.27/2.0) - median, 
                             median - np.percentile(values, 50 + 68.27/2.0)])
@@ -704,7 +704,7 @@ class Semiautocut:
                 
         elif ('sigma_lower' in cut_pars):
             #for sigma calculations, if we need them
-            values = self.df[self.cut_rq].values
+            values = self.df.evaluate(self.cut_rq, selection = True)
             median = np.percentile(values, 50)
             sigma = np.mean([np.percentile(values, 50 - 68.27/2.0) - median, 
                             median - np.percentile(values, 50 + 68.27/2.0)])
@@ -716,7 +716,7 @@ class Semiautocut:
             
         elif('sigma' in cut_pars):
             #for sigma calculations, if we need them
-            values = self.df[self.cut_rq].values
+            values = self.df.evaluate(self.cut_rq, selection = True)
             median = np.percentile(values, 50)
             sigma = np.mean([np.percentile(values, 50 - 68.27/2.0) - median, 
                             median - np.percentile(values, 50 + 68.27/2.0)])
