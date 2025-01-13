@@ -1,6 +1,0 @@
-numpy
-matplotlib
-astropy
-pytesdaq>=0.3.3
-vaex
-tabulate
