@@ -657,7 +657,6 @@ class Semiautocut:
             else:
                 cut_mask = self.df[self.cut_rq].values < value_upper
         elif ('percent_lower' in cut_pars):
-            # values = self.df[self.cut_rq].values
             values = self.df.evaluate(self.cut_rq, selection = True)
             value_lower = np.percentile(values, cut_pars['percent_lower']*100)
             self.values_lower[on_cut_bin] = value_lower
