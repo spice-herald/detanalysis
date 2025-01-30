@@ -1032,6 +1032,7 @@ class Semiautocut:
     #plotting functions
     def plot_vs_time(self, lgchours=False, lgcdiagnostics=False,
                      include_previous_cuts=False, v0=0.0,
+                     lgc_randoms=True, lgc_triggers=True, 
                      xlabel=None, ylabel=None, xlim=None, ylim=None, title=None, 
                      time_since_start=False, savename=None):
         """
@@ -1056,6 +1057,12 @@ class Semiautocut:
         v0 : float, optional
             Used with the baseline, to construct an estimated baseline
             power in the channel.
+            
+        lgc_randoms : bool, optional
+            If True, includes randoms in the plots.
+            
+        lgc_triggers : bool, optional
+            If True, includes triggers in plots.
             
         xlabel : string, optional
             If not None, is used as the x axis label.
@@ -1118,6 +1125,17 @@ class Semiautocut:
         self.df['_trues'] = np.ones(len(self.df), dtype = 'bool')
         self.df.select('_trues', mode='replace')
         
+        if lgc_randoms:
+            if not lgc_triggers:
+                trig_sel = (self.df.trigger_type == 3.0)
+                trig_title = "Showing Randoms Only"
+            else:
+                trig_sel = (self.df.trigger_type == 3.0) | (self.df.trigger_type == 4.0)
+                trig_title = "Showing Triggers and Randoms"
+        elif lgc_triggers:
+            trig_sel = (self.df.trigger_type == 4.0)
+            trig_title = "Showing Triggers Only"
+        
         if v0 == 0.0:
             plot_var = self.df[self.cut_rq]
         else:
@@ -1126,8 +1144,9 @@ class Semiautocut:
             
         #plot all events
         
-        times_all = np.asarray((self.df.event_time.values)/time_norm - time_dif)
-        vals_all = np.asarray(self.df[str(plot_var)].values)
+        df_all = self.df[trig_sel]
+        times_all = np.asarray((df_all.event_time.values)/time_norm - time_dif)
+        vals_all = np.asarray(df_all[str(plot_var)].values)
         
         cmap = copy(mpl.cm.get_cmap('winter') )
         cmap.set_bad(alpha = 0.0, color = 'Black')
@@ -1148,7 +1167,7 @@ class Semiautocut:
         comb_cuts = self.df[str(cut_names[0])]
         for cut in cut_names[1:]:
             comb_cuts &= self.df[str(cut)]
-        df_sel = self.df[comb_cuts]                        
+        df_sel = self.df[comb_cuts & trig_sel]                        
         times_cut = np.asarray((df_sel.event_time.values)/time_norm - time_dif)
         vals_cut = np.asarray(df_sel[str(plot_var)].values)
         
@@ -1189,7 +1208,7 @@ class Semiautocut:
             i += 1
         
         if title is None:                  
-            plt.title("Cut: " + str(self.cut_name) + ", \n " + str(self.cut_rq) + " vs. Time")
+            plt.title("Cut: " + str(self.cut_name) + ", \n " + str(self.cut_rq) + " vs. Time" + "\n" + trig_title)
         else:
             plt.title(title)
         
@@ -1217,7 +1236,7 @@ class Semiautocut:
             plt.ylim([min(vals_all), max(vals_all)])
         
         if savename is not None:
-            plt.savefig(savename)
+            plt.savefig(savename, bbox_inches='tight')
         
         plt.show()
         
@@ -1246,7 +1265,7 @@ class Semiautocut:
         
         if title is None:                   
             plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + " vs. Time \n " + 
-                    " Zoomed In")
+                    " Zoomed In" + "\n" + trig_title)
         else:
             plt.title(title)
             
@@ -1306,7 +1325,7 @@ class Semiautocut:
         
         
         if savename is not None:
-            plt.savefig(savename[:-4] + "_zoom.pdf")
+            plt.savefig(savename[:-4] + "_zoom.pdf", bbox_inches='tight')
             
         plt.show()
         
@@ -1440,7 +1459,7 @@ class Semiautocut:
             plt.ylim(ylim)
         
         if savename is not None:
-            plt.savefig(savename)
+            plt.savefig(savename, bbox_inches='tight')
         
         plt.show()
         
@@ -1496,7 +1515,7 @@ class Semiautocut:
             plt.xlim(xlim)
             
         if savename is not None:
-            plt.savefig(savename[:-4] + '_zoom.pdf')
+            plt.savefig(savename[:-4] + '_zoom.pdf', bbox_inches='tight')
         
         plt.show()
         
@@ -1740,11 +1759,12 @@ class Semiautocut:
             plt.ylabel(self.chi2_rq)
         
         if savename is not None:
-            plt.savefig(savename)
+            plt.savefig(savename, bbox_inches='tight')
         
         plt.show()
             
     def plot_histograms(self, lgcdiagnostics=False, include_previous_cuts=False,
+                        lgc_randoms=True, lgc_triggers=True, 
                         num_bins=100, v0=0.0):
         """
         Plots histogram of RQ showing passing and failing events,
@@ -1762,6 +1782,12 @@ class Semiautocut:
             including "cut_" and the channel name. If an array, includes
             all cut RQs in the array.
             
+        lgc_randoms : bool, optional
+            If True, includes randoms in the plots.
+            
+        lgc_triggers : bool, optional
+            If True, includes triggers in plots.
+            
         num_bins : int, optional
             Number of bins to plot in the histogram. Defaults to 100.
             
@@ -1770,6 +1796,19 @@ class Semiautocut:
             on baseline, and uses this to plot in units of fW instead of amps.
         
         """
+        
+        if lgc_randoms:
+            if not lgc_triggers:
+                trig_sel = (self.df.trigger_type == 3.0)
+                trig_title = "Showing Randoms Only"
+            else:
+                trig_sel = (self.df.trigger_type == 3.0) | (self.df.trigger_type == 4.0)
+                trig_title = "Showing Triggers and Randoms"
+        elif lgc_triggers:
+            trig_sel = (self.df.trigger_type == 4.0)
+            trig_title = "Showing Triggers Only"
+            
+        df_trig_sel = self.df[trig_sel]
         
         #figures out what cuts to include in the "with cuts" plot
         cut_names = []        
@@ -1790,24 +1829,31 @@ class Semiautocut:
             print("Cut names to include in with cuts plot: ")
             print(str(cut_names))
         
-        #reset selection 
-        self.df['_trues'] = np.ones(len(self.df), dtype='bool')
-        self.df.select('_trues', mode='replace')
+        comb_cuts = self.df[str(cut_names[0])]
+        for cut in cut_names[1:]:
+            comb_cuts &= self.df[str(cut)]
+        df_sel = self.df[comb_cuts & trig_sel]
+        
         
         if v0 == 0.0:
-            plot_var = self.cut_rq
+            vals_all = df_trig_sel[self.cut_rq].values
+            vals_passing = df_sel[self.cut_rq].values
         else:
-            min_val = min(self.df[self.cut_rq].values)
+            min_val = min(df_trig_sel[self.cut_rq].values)
             print(min_val)
-            plot_var = (self.df[self.cut_rq] - min_val) * v0 * 1e15
+            vals_all = (df_trig_sel[self.cut_rq].values - min_val) * v0 * 1e15
+            vals_passing = (df_sel[self.cut_rq].values - min_val) * v0 * 1e15
+            
+            
         
-        self.df.viz.histogram(plot_var, label = "All Events", shape=num_bins)
-        
-        self.df.viz.histogram(plot_var, label = "Passing Cut/s", selection=cut_names, shape=num_bins)
+        plt.hist(vals_all, label = "All Events", bins=num_bins, histtype='step',
+                 range =[min(vals_all), max(vals_all)])
+        plt.hist(vals_passing, label = "Passing Cut/s", bins=num_bins, histtype='step',
+                 range =[min(vals_all), max(vals_all)])
         plt.yscale('log')
         plt.legend()
         plt.grid()
-        plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + " Histogram")
+        plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + " Histogram" + "\n" + trig_title)
         if v0 != 0.0:
             plt.xlabel("Estimated Baseline Power, Baseline Subtraced (fW)")
         plt.show()
@@ -1820,19 +1866,15 @@ class Semiautocut:
             center_val_y = (0.5 * (min(self.value_lower_arr) + max(self.value_upper_arr)) - min_val) * v0 * 1e15
             delta_y = (max(self.value_upper_arr) - min(self.value_lower_arr)) * v0 * 1e15
         
-        #reset selection 
-        self.df['_trues'] = np.ones(len(self.df), dtype='bool')
-        self.df.select('_trues', mode='replace')
+        plt.hist(vals_all, label = "All Events", bins=num_bins, 
+                                range=[center_val_y - delta_y, center_val_y + delta_y], histtype='step')
         
-        self.df.viz.histogram(plot_var, label = "All Events", shape=num_bins, 
-                                limits=[center_val_y - delta_y, center_val_y + delta_y])
-        
-        self.df.viz.histogram(plot_var, label = "Passing Cut/s", selection=cut_names, shape=num_bins,
-                                limits=[center_val_y - delta_y, center_val_y + delta_y])
+        plt.hist(vals_passing, label = "Passing Cut/s", bins=num_bins,
+                                range=[center_val_y - delta_y, center_val_y + delta_y], histtype='step')
         plt.yscale('log')
         plt.legend()
         plt.grid()
-        plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + " Histogram")
+        plt.title("Cuts: " + str(cut_names) + ", \n " + str(self.cut_rq) + " Histogram" + "\n" + trig_title)
         if v0 != 0.0:
             plt.xlabel("Estimated Baseline Power, Baseline Subtraced (fW)")
         plt.show()
@@ -1955,7 +1997,7 @@ class Semiautocut:
             plt.show()
         
             
-    def get_passage_fraction(self, lgcprint=False):
+    def get_passage_fraction(self, lgcprint=False, lgc_randoms=True, lgc_triggers=True):
         """
         Calculates and returns the passage fraction for the cut.
         
@@ -1966,6 +2008,12 @@ class Semiautocut:
             If True, prints a diagostic message including the
             passage fraction and number of passing, failing and
             total events.
+            
+        lgc_randoms : bool, optional
+            If True, includes randoms in the statistics.
+            
+        lgc_triggers : bool, optional
+            If True, includes triggers in the statistics.
                 
         Returns
         -------
@@ -1974,15 +2022,30 @@ class Semiautocut:
             Fraction of events that pass the cuts (i.e. 0-1)
             
         """
+        
+        if lgc_randoms:
+            if not lgc_triggers:
+                trig_sel = (self.df.trigger_type == 3.0)
+                trig_title = " (Randoms Only)"
+            else:
+                trig_sel = (self.df.trigger_type == 3.0) | (self.df.trigger_type == 4.0)
+                trig_title = " (Triggers and Randoms)"
+        elif lgc_triggers:
+            trig_sel = (self.df.trigger_type == 4.0)
+            trig_title = " (Triggers Only)"
             
-        passage_fraction = sum(self.mask)/len(self.mask)
+        df_trig_sel = self.df[trig_sel]
+        mask = df_trig_sel[self.cut_name].values
+        
+        passage_fraction = sum(mask)/len(mask)
             
         if lgcprint:
             print("Cut name: " + str(self.cut_name))
-            print("Passage fraction: " + str(passage_fraction))
-            print("Number of events passing cuts: " + str(sum(self.mask)))
-            print("Number of events failing cuts: " + str(len(self.mask) - sum(self.mask)))
-            print("Number of total events: " + str(len(self.mask)))
+            print("Passage fraction: " + str(passage_fraction) + trig_title)
+            print("Number of events passing cuts: " + str(sum(mask)) + trig_title)
+            print("Number of events failing cuts: " + str(len(mask) - sum(mask)) + trig_title)
+            print("Number of total events: " + str(len(mask)) + trig_title)
+            print(" ")
                 
         return passage_fraction
         
