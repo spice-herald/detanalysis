@@ -2244,7 +2244,7 @@ class MasterSemiautocuts:
         cuts_all_arr = np.ones(len(self.df), dtype = 'bool')
             
         if lgc_diagnostics:
-            print("Combining cuts: " + str(cuts_to_combine))
+            print("Combining cuts: " + str(self.cuts_list))
             
         i = 0
         while i < len(self.cuts_list):
