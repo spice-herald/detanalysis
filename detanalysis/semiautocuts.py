@@ -449,7 +449,7 @@ class Semiautocut:
             
         if 'time_arr' in self.cut_pars:
             self._do_time_cut(lgcdiagnostics=lgcdiagnostics)
-        elif (self.time_bins == None) and (self.ofamp_bins == None):
+        elif (self.time_bins is None) and (self.ofamp_bins is None):
             self._do_simple_cut(lgcdiagnostics=lgcdiagnostics,
                                 include_previous_cuts=include_previous_cuts)
         elif self.time_bins_arr is not None:
