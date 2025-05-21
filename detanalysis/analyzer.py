@@ -1726,6 +1726,7 @@ class Analyzer:
                    pretrigger_length_msec=None,
                    pretrigger_length_samples=None,
                    cut=None,
+                   feat_list=None,
                    nb_random_samples=None,
                    nb_events_check=True,
                    nb_events_limit=1000,
@@ -1762,6 +1763,10 @@ class Analyzer:
             selection to be used
             e.g  cut=df.x<2 or cut='mycut'
             default: None
+
+        feat_list : str or list of str, optional
+            list of feature columns to pull 
+            alongside traces
 
         nb_random_samples : int, optional
           number of randomly selected events (after cut)
@@ -1800,6 +1805,7 @@ class Analyzer:
             nb_events_check=nb_events_check,
             nb_events_limit=nb_events_limit
         )
+
         
 
         # get raw data
@@ -1823,10 +1829,22 @@ class Analyzer:
         
         h5.clear()
         
-
-        
-        
-        return traces, info
+        # Pull feature data if specified
+        if feat_list is not None:
+            event_num_list = [event['event_number'] for event in event_list]
+            trigger_ind_list = [event['trigger_index'] for event in event_list]
+            sample_data = np.array([event_num_list,trigger_ind_list]).T
+            sample_df = vx.from_pandas(pd.DataFrame(sample_data, columns=['event_number', 'trigger_index']))
+            sample_df['indentifier'] = sample_df.event_number.astype(str) + '_' + sample_df.trigger_index.astype(str)
+            sample_df['order'] = np.arange(len(sample_df))
+            df = self._df.copy()
+            df['indentifier'] = df.event_number.astype(str) + '_' + df.trigger_index.astype(str)
+            filtered_df = df.join(sample_df[['indentifier','order']], on='indentifier', how='inner')
+            feature_data = filtered_df.sort('order')
+            feature_data = feature_data[feat_list].values
+            return traces, info, feature_data
+        else:
+            return traces, info
 
 
 
