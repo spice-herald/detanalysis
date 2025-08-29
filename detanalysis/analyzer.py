@@ -10,8 +10,8 @@ from pprint import pprint
 import importlib
 from inspect import getmembers, isfunction
 import git
+from git import GitCommandError, InvalidGitRepositoryError, NoSuchPathError, Head
 import qetpy as qp
-
 
 _all__ = ['Analyzer']
 
@@ -33,6 +33,7 @@ class Analyzer:
     
     def __init__(self, paths, series=None,
                  analysis_repo=None,
+                 use_vaex_cut_handling=True,
                  load_from_pandas=False,
                  memory_cache_size='1GB'):
         """
@@ -50,7 +51,7 @@ class Analyzer:
 
         analysis_repo : str, optional
            path to analysis package containing 
-           "cuts" and "features" directory
+           "cuts" and "features" directories
            Default: None (path to cuts/features can be defined
                     in load_cuts / load_derived_features directly)
 
@@ -73,14 +74,9 @@ class Analyzer:
         self._feature_names = None
         self._load_from_pandas = load_from_pandas
 
-        # intialize cut dict
-        # {cut_name: {metadata dict}}
+        # intialize cut and derived features dict
         self._cuts = None
-
-        # Initialize derived features dict
-        # {feature_name: {metadata_dict}}
         self._derived_features = None
-        
         
         # add files and open
         self.add_files(paths, series=series,
@@ -98,15 +94,18 @@ class Analyzer:
         # vaex.cache.path = ...
         # vaex.cache.multilevel_cache()
         
+        # cuts type
+        self._use_vaex_cut_handling = use_vaex_cut_handling
+
         
         # analysis package directory containing "cuts", "features"
         # directories
+        self._analysis_repo_path = analysis_repo
         self._analysis_repo = None
         if analysis_repo is not None:
             self.set_analysis_repo(analysis_repo, load_func=True)
             
-       
-        
+             
         
     @property
     def df(self):
@@ -299,13 +298,16 @@ class Analyzer:
             self._cuts = dict()
                 
         # apply and register
-        self._df.select(cut,
-                        name=name,
-                        mode=mode)
-        
+        if self._use_vaex_cut_handling:
+            self._df.select(cut,
+                            name=name,
+                            mode=mode)
+        else:
+            self._df.add_virtual_column(name, cut)
+            self._fill_df_info()
+            
         # update dictionary
         self._cuts[name] = metadata
-
 
         
     def register_cut_box(self, features, limits,
@@ -557,27 +559,30 @@ class Analyzer:
 
         """
 
-        
+
         # check path and get list of files
-        if (cuts_path is None
-            and self._analysis_repo is None):
-            print('ERROR: A path to the cuts needs '
-                  + 'to be provided!')
-            return
-
-
         if cuts_path is None:
-            cuts_path = self._analysis_repo.working_dir + '/cuts'
+
+            if self._analysis_repo_path is None:
+                print('WARNING: No path to feature scripts found! No cuts added.')
+                return
+            
+            cuts_path = self._analysis_repo_path + '/cuts'
 
             # if directory not found, then walk through subdirectories
             if not os.path.isdir(cuts_path):
-                for dir_tuple in os.walk(self._analysis_repo.working_dir):
+                for dir_tuple in os.walk(self._analysis_repo_path):
                     if dir_tuple and 'cuts' in dir_tuple[1]:
                         cuts_path = dir_tuple[0]  + '/cuts'
                         break
-            
-            
-        repo_info = self._get_repo_info()
+                    
+        if not os.path.isdir(cuts_path):
+            print(f'WARNING: No cut directory found in {cuts_path}!')
+            return
+
+
+        # get repo info
+        repo_info = self._get_repo_info()    
             
         # get functions and load
         self._load_func(cuts_path,
@@ -599,10 +604,6 @@ class Analyzer:
           path to the features directory or or full path file name(s)
           Default: None (use path defined during initialization)
 
-        update_git: boolean, optional
-          update to latest git version 
-
-
         overwrite : boolean, optional
            if True, overwrite feature if exist already
            (case existing feature same/higher version)
@@ -617,27 +618,31 @@ class Analyzer:
         None
 
         """
+
         # check path and get list of files
-        if (features_path  is None
-            and self._analysis_repo is None):
-            print('ERROR: A path to features needs '
-                  + 'to be provided!')
-            return
-        
-     
         if features_path is None:
-            features_path = self._analysis_repo.working_dir  + '/features'
+
+            if self._analysis_repo_path is None:
+                print('WARNING: No path to feature scripts found! No features added.')
+                return
+            
+            features_path = self._analysis_repo_path + '/features'
 
             # if directory not found, then walk through subdirectories
             if not os.path.isdir(features_path):
-                for dir_tuple in os.walk(self._analysis_repo.working_dir):
+                for dir_tuple in os.walk(self._analysis_repo_path):
                     if dir_tuple and 'features' in dir_tuple[1]:
                         features_path = dir_tuple[0]  + '/features'
                         break
+                    
+        if not os.path.isdir(features_path):
+            print(f'WARNING: No feature directory found in {features_path}!')
+            return
+
 
         # get repo info
         repo_info = self._get_repo_info()       
-
+        
             
         # get functions and load
         self._load_func(features_path,
@@ -645,8 +650,6 @@ class Analyzer:
                         repo_info=repo_info,
                         overwrite=overwrite)
         
-
-
          
         
     def clean(self):
@@ -1374,12 +1377,11 @@ class Analyzer:
         # instantiate repo
         try:
             self._analysis_repo  = git.Repo(repo_path)
+            self._analysis_repo_path = self._analysis_repo.working_dir
         except git.exc.GitError as e:
-            print('\nWARNING: Problem with analysis repo "'
-                  + repo_path
-                  +'".\n Is it a git package?')
-            
-            
+            print(f'\nWARNING: analysis repo {repo_path} is not '
+                  f'a git package!')
+            self._analysis_repo_path = repo_path
         
         if load_func:
             self.load_derived_features()
@@ -1980,8 +1982,6 @@ class Analyzer:
         ------
         None
       
-        
-
         """
 
         # get list of python script
@@ -2065,63 +2065,108 @@ class Analyzer:
 
                 # register
                 vaex_expr = func_obj(self._df)
+                
                 if is_cut:
                     self.register_cut(vaex_expr,
                                       name=func_name,
                                       metadata=func_metadata,
                                       overwrite=True,
                                       mode='replace')
-
                 else:
                     self.add_feature(vaex_expr,
                                      name=func_name,
                                      metadata=func_metadata,
                                      overwrite=True)
 
-        
+    
     def _get_repo_info(self):
         """
-        Extract analysis repo information
-
-        Parameters
-        ----------
-        None
-
-
-        Return
-        ------
-
-        repo_info : dict
-          dictionary with git info
+        Extract analysis repo information.
+        
+        Returns
+        -------
+        dict
+        {
+          'git_repo_name': str|None,
+          'git_repo_branch': str|None,
+          'git_repo_tag': str|None,     # tag/describe OR short hash (with -dirty)
+          'git_repo_commit': str|None,  # short hash (with -dirty)
+        }
         """
+        repo_info = {
+            'git_repo_name': None,
+            'git_repo_branch': None,
+            'git_repo_tag': None,
+            'git_repo_commit': None,
+        }
 
-
-        # initialize
-        repo_info = dict()
-        repo_info['git_repo_name'] = None
-        repo_info['git_repo_branch'] = None
-        repo_info['git_repo_tag']  = None
-        # check if repo exist
+        # No repo set
         if self._analysis_repo is None:
-            print('WARNING: No git repo available. '
-                  + 'Use "set_analysis_repo" function '
-                  + 'to set it!')
+            print('WARNING: No git repo available. Use "set_analysis_repo" to set it!')
             return repo_info
-        
 
-        repo_info['git_repo_name'] = os.path.basename(
-            self._analysis_repo.working_dir
-        )
-        
+        repo = self._analysis_repo
 
-        repo_info['git_repo_branch'] = (
-            self._analysis_repo.git.branch('--show-current')
-        )
+        # Basic name
+        try:
+            repo_info['git_repo_name'] = os.path.basename(repo.working_dir) if repo.working_dir else None
+        except Exception:
+            pass
 
-        repo_info['git_repo_tag'] =  (
-            self._analysis_repo.git.describe(
-                '--tags', '--dirty', '--broken'
-            )
-        )
+        # Detect empty repo (no commits yet)
+        is_empty = False
+        try:
+            _ = repo.head.commit  # raises ValueError if repo is empty
+        except ValueError:
+            is_empty = True
+        except Exception:
+            # If anything else goes wrong, treat conservatively
+            pass
+
+        # Branch (None if detached or empty)
+        try:
+            if not is_empty:
+                # active_branch raises if detached
+                repo_info['git_repo_branch'] = getattr(repo.active_branch, "name", None)
+            else:
+                repo_info['git_repo_branch'] = None
+        except TypeError:
+            # detached HEAD or something unusual
+            repo_info['git_repo_branch'] = None
+        except Exception:
+            repo_info['git_repo_branch'] = None
+
+        # Commit short hash (fallback) + dirty marker
+        try:
+            if not is_empty:
+                short = repo.git.rev_parse('--short', 'HEAD')
+                if repo.is_dirty():
+                    short += '-dirty'
+                repo_info['git_repo_commit'] = short
+        except Exception:
+            repo_info['git_repo_commit'] = None
+
+        # Tag/describe with sensible fallbacks
+        # 1) If there are tags, try describe --tags
+        # 2) Else fallback to --always (short hash), and append -dirty if needed
+        try:
+            if not is_empty:
+                has_any_tags = bool(repo.tags)
+                if has_any_tags:
+                    desc = repo.git.describe('--tags', '--dirty', '--broken')
+                else:
+                    # no tags in the repo -> use --always
+                    desc = repo.git.describe('--always')
+                    if repo.is_dirty():
+                        desc += '-dirty'
+                repo_info['git_repo_tag'] = desc
+        except GitCommandError:
+            # As a final fallback, use short hash (already computed above)
+            repo_info['git_repo_tag'] = repo_info['git_repo_commit']
+        except Exception:
+            repo_info['git_repo_tag'] = repo_info['git_repo_commit']
 
         return repo_info
+
+
+
