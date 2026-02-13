@@ -5,11 +5,14 @@ from scipy.optimize import least_squares
 import matplotlib.pyplot as plt
 from tabulate import tabulate
 import copy
+import pytesdaq.io as h5io
 
-from qetpy.core.didv._uncertainties_didv import get_power_noise_with_uncertainties, get_dPdI_with_uncertainties
+
+from qetpy.core.didv._uncertainties_didv import get_dPdI_with_uncertainties
 from qetpy.core import calc_psd
-from qetpy.utils import make_template_twopole, lowpassfilter
+from qetpy.utils import make_template_twopole, make_template_threepole, make_template_fourpole, lowpassfilter
 from qetpy.core.didv import stdcomplex
+import detanalysis as da
 
 from scipy.fftpack import fft, ifft, fftfreq
 
@@ -30,37 +33,29 @@ class PhotonCalibration:
     """
     
     def __init__(self, template_model, photon_energy_ev, analyzer_object, 
-                 didv_result, channel_name,
-                 fs=1.25e6, trace_length=10e-3, pretrigger_window=None):
+                 filterfile_path, npoles, channel_name,
+                 fs=1.25e6, trace_length_sec=10e-3, pretrigger_window_sec=None,
+                 dpdi_tag = 'default'):
         """
         Initializes PhotonCalibration
 
         Parameters
         ----------
         template_model : string
-            String that's shorthand for the template model used.
+            String that's shorthand for the template model used to fit the observed
+            pulses IN POWER SPACE
             Currently supported models:
             
-                "onepulse": models the power domain template as
-                            one two pole pulse.
+                "twopole": models the power domain template as
+                           a two pole pulse with one fall time
             
-                "twopulse": models the power domain template as
-                            the sum of two two pole pulses which
-                            share the same rise time
+                "threepole": models the power domain template
+                             as a three pole pulse with two fall
+                             times
             
-                "threepulse": models the power domain template as
-                            the sum of three two pole pulses which
-                            share the same rise time
-                            
-                "deltapulse" : models the power domain template as
-                               the sum of a delta function (high for
-                               just one time bin) and a two pole
-                               pulse.
-                            
-                "deltatwopulse" : models the power domain template as
-                                  the sum of a delta function (high for
-                                  just one time bin) and two two pole
-                                  pulses.
+                "fourpole": models the power domain template 
+                            as a four pole pulse with three fall
+                            times
                             
         photon_energy_ev : float
             The energy of the photons used for this calibration
@@ -71,9 +66,12 @@ class PhotonCalibration:
             Used to get events out of (the dataframe inside this object
             is what's mostly used.)
             
-        didv_result : dIdV result object
-            Used to construct a dPdI to understand the electrothermal
-            response of the TES.
+        filterfile_path : string
+            Path to .hdf5 file containing dpdi
+            results for the relevant channel.
+
+        npoles : string
+            Number of poles of the dpdi model used
             
         channel_name : string
             The name of the channel being analyzed, e.g.
@@ -96,8 +94,7 @@ class PhotonCalibration:
         self.calibration_df = analyzer_object.df
         self.channel_name = channel_name
         self.fs = fs
-        self.didv_result = didv_result
-        
+        self.filterfile_path = filterfile_path
         self.amp_rq = None
         self.cut_rq = None
         self.spectrum_bins = None
@@ -109,19 +106,19 @@ class PhotonCalibration:
         
         self.photon_traces_dict = {}
         
-        self.trace_length = 10e-3
-        self.pretrigger_window = 5e-3
-        if pretrigger_window is None:
-            self.pretrigger_window = trace_length/2.0
+        self.trace_length = trace_length_sec
+        if pretrigger_window_sec is None:
+            self.pretrigger_window = self.trace_length/2.0
         else:
-            self.pretrigger_window = pretrigger_window
-        self.trace_length = trace_length
+            self.pretrigger_window = pretrigger_window_sec
+
         self.dt = 0.0
         self.traces_raw_path = None
-        self.t_arr = None
+        self.t_arr = np.arange(0, (self.trace_length), 1/self.fs)
+
         self.crosstalk_template = None
         
-        self.freqs = None
+        self.freqs = fftfreq(len(self.t_arr), 1/self.fs)
         self.mean_i_t_dict = {}
         self.mean_i_f_dict = {}
         self.psd_i_dict = {}
@@ -129,6 +126,10 @@ class PhotonCalibration:
         
         self.dpdi = None
         self.dpdi_err = None
+        self.npoles = npoles
+        self.dpdi_tag = dpdi_tag
+        self._extract_dPdI()
+
         self.mean_p_t_dict = {}
         self.mean_p_f_dict = {}
         self.psd_p_dict = {}
@@ -160,81 +161,98 @@ class PhotonCalibration:
         
         Returns
         -------
-        gaussian_value :loat
+        gaussian_value :float
 
         """
         return height * np.exp(-0.5 * (x - mean)**2 * (std)**-2)
 
     
-    def _sum_2_gaussians(self, x,
-                         height_1, mean_1, std_1, 
-                         height_2, mean_2, std_2):
+    def _free_gaussians(self, x,
+                        means,
+                        stds,
+                        heights,
+                        n_gaussians = 5):
         """
-        Internal function to calculate the sum of two
-        Gaussians.
+        Sum of N gaussians with no constraints; user defines means/stds/heights
+
+        Parameters
+        ----------
+
+        means : list
+            list of means for each peak
+        stds : list 
+            list of standard deviations for each peak
+        heights : list 
+            list of the heights of each peak
+        n_gaussians : int
+            number of peaks to model
+
+        Returns
+        -------
+            distribution_val : float
+
         """
+        distribution_val = np.zeros(len(x))
         
-        gaussian_1 = self._gaussian(x, height_1, mean_1, std_1)
-        gaussian_2 = self._gaussian(x, height_2, mean_2, std_2)
-        
-        return gaussian_1 + gaussian_2
+        i = 0
+        while i < n_gaussians:
+            distribution_val += self._gaussian(x, heights[i], means[i], stds[i])
+            i += 1
+            
+        return distribution_val
     
-    def _sum_3_gaussians(self, x, 
-                         height_1, mean_1, std_1, 
-                         height_2, mean_2, std_2, 
-                         height_3, mean_3, std_3):
+    def _non_poisson_gaussians(self,x,
+                                photon_energy,
+                                stds,
+                                heights,
+                                n_gaussians = 5):
         """
-        Internal function to calculate the sum of three
-        Gaussians.
+        Sum of N gaussians with constraint of equal spacing
+
+        Parameters
+        ----------
+        x : float
+            Value(s) at which the Gaussian is evaluated
+            
+        photon_energy : float
+            The energy of the photons used for the distribution,
+            i.e. the distance between the Gaussians.
+
+        std : float
+            Width of the Gaussians (in standard deviations).
+
+        heights: float
+            List of the heights of each peak          
+
+        n_gaussians : int, optional
+            Number of gaussians to sum together to make the
+            distribution.
+        
+        
+        Returns
+        -------
+        distribution_val : float
         """
+        distribution_val = np.zeros(len(x))
         
-        gaussian_1 = self._gaussian(x, height_1, mean_1, std_1)
-        gaussian_2 = self._gaussian(x, height_2, mean_2, std_2)
-        gaussian_3 = self._gaussian(x, height_3, mean_3, std_3)
-        
-        return gaussian_1 + gaussian_2 + gaussian_3
+        i = 0
+        while i < n_gaussians:
+            distribution_val += self._gaussian(x, heights[i], i*photon_energy, stds[i])
+            i += 1
+            
+        return distribution_val
     
-    def _sum_4_gaussians(self, x,
-                         height_1, mean_1, std_1, 
-                         height_2, mean_2, std_2, 
-                         height_3, mean_3, std_3, 
-                         height_4, mean_4, std_4):
+
+
+    def _poisson_gaussians(self, x, 
+                           photon_energy, 
+                           stds, 
+                           num_photons,
+                           height,
+                           n_gaussians=5):
         """
-        Internal function to calculate the sum of four
-        Gaussians.
-        """
-        
-        gaussian_1 = self._gaussian(x, height_1, mean_1, std_1)
-        gaussian_2 = self._gaussian(x, height_2, mean_2, std_2)
-        gaussian_3 = self._gaussian(x, height_3, mean_3, std_3)
-        gaussian_4 = self._gaussian(x, height_4, mean_4, std_4)
-        
-        return gaussian_1 + gaussian_2 + gaussian_3 + gaussian_4
-    
-    def _sum_5_gaussians(self, x, 
-                         height_1, mean_1, std_1, 
-                         height_2, mean_2, std_2, 
-                         height_3, mean_3, std_3, 
-                         height_4, mean_4, std_4, 
-                         height_5, mean_5, std_5):
-        """
-        Internal function to calculate the sum of four
-        Gaussians.
-        """
-        
-        gaussian_1 = self._gaussian(x, height_1, mean_1, std_1)
-        gaussian_2 = self._gaussian(x, height_2, mean_2, std_2)
-        gaussian_3 = self._gaussian(x, height_3, mean_3, std_3)
-        gaussian_4 = self._gaussian(x, height_4, mean_4, std_4)
-        gaussian_5 = self._gaussian(x, height_5, mean_5, std_5)
-        
-        return gaussian_1 + gaussian_2 + gaussian_3 + gaussian_4 + gaussian_5
-    
-    
-    def _poission_gaussians(self, x, 
-                            photon_energy, num_photons, std, height, n_gaussians=10):
-        """
-        Internal function to calculate a gaussian.
+        Model for sum of equally spaced gaussians whose areas are distributed
+        according to a poisson random variable
         
         Parameters
         ----------
@@ -247,15 +265,14 @@ class PhotonCalibration:
             
         num_photons : float
             The average number of photons, used to construct
-            the relative heights of the peaks of the Poission
+            the relative heights of the peaks of the Poisson
             distribution
-            
+        height : float
+            The height of the zero photon peak.          
+
         std : float
             Width of the Gaussians (in standard deviations).
-            
-        height : float
-            The height of the distribution.
-            
+        
         n_gaussians : int, optional
             Number of gaussians to sum together to make the
             distribution.
@@ -271,13 +288,17 @@ class PhotonCalibration:
         
         i = 0
         while i < n_gaussians:
-            height_peak = height * num_photons**i * np.exp(-num_photons) / sp.special.factorial(i)
-            distribution_val += self._gaussian(x, height_peak, photon_energy*i, std)
+            height_peak = height * num_photons**i / sp.special.factorial(i) * stds[0] / stds[i]
+            distribution_val += self._gaussian(x, height_peak, photon_energy*i, stds[i])
             i += 1
             
         return distribution_val
-    
-    def _model_spectrum(self, x, model, params):
+   
+    def _model_spectrum(self, x, 
+                        params,
+                        poisson = False, 
+                        eqspacing = True,
+                        npeaks = 5):
         """
         Helper function for getting a specific spectrum model.
         
@@ -287,217 +308,218 @@ class PhotonCalibration:
         x : numpy array
             Value (or values) at which to evaluate the function
             
-        model : string
-            The model being used (see fit_spectrum for models)
+        params : list/array
+            List of parameters that define the spectrum. In order, this should include
+            - means (either a list of N means if eqspacing == True, otherwisethe gap between peaks )
+        poisson : bool
+            Whether or not amplitude degrees of freedom should be
+            constrained according to poisson statistics
         
-        params : array
-            The parameters passed to the model
+        eqspacing : bool
+            Whether to mandate equal energy spacing between peaks or not.
+            If True
+
+        npeaks : bool
+            Number of peaks to simulation
             
         Returns:
         --------
         modeled_vals : numpy array
         """
-        
-        if model == 'poisson':
-            photon_energy, num_photons, std, height = params
-            modeled_vals = self._poission_gaussians(x,
-                                                    photon_energy, num_photons, std, height)
-        elif model == 'two_gaus':
-            height_1, mean_1, std_1 = params[0:3]
-            height_2, mean_2, std_2 = params[3:6]
-            modeled_vals = self._sum_2_gaussians(x, 
-                                                 height_1, mean_1, std_1, 
-                                                 height_2, mean_2, std_2)
-        elif model == 'three_gaus':
-            height_1, mean_1, std_1 = params[0:3]
-            height_2, mean_2, std_2 = params[3:6]
-            height_3, mean_3, std_3 = params[6:9]
-            modeled_vals = self._sum_3_gaussians(x, 
-                                                 height_1, mean_1, std_1, 
-                                                 height_2, mean_2, std_2, 
-                                                 height_3, mean_3, std_3)
-        elif model == 'four_gaus':
-            height_1, mean_1, std_1 = params[0:3]
-            height_2, mean_2, std_2 = params[3:6]
-            height_3, mean_3, std_3 = params[6:9]
-            height_4, mean_4, std_4 = params[9:12]
-            modeled_vals = self._sum_4_gaussians(x, 
-                                                 height_1, mean_1, std_1, 
-                                                 height_2, mean_2, std_2, 
-                                                 height_3, mean_3, std_3, 
-                                                 height_4, mean_4, std_4)
-        elif model == 'five_gaus':
-            height_1, mean_1, std_1 = params[0:3]
-            height_2, mean_2, std_2 = params[3:6]
-            height_3, mean_3, std_3 = params[6:9]
-            height_4, mean_4, std_4 = params[9:12]
-            height_5, mean_5, std_5 = params[12:15]
-            modeled_vals = self._sum_5_gaussians(x, 
-                                                 height_1, mean_1, std_1, 
-                                                 height_2, mean_2, std_2, 
-                                                 height_3, mean_3, std_3, 
-                                                 height_4, mean_4, std_4, 
-                                                 height_5, mean_5, std_5)
+        if eqspacing == True:
+            if poisson == True:
+                photon_energy = params[0]
+                stds = params[1:1+npeaks]
+                num_photons = params[1+npeaks]
+                height = params[2+npeaks]
+                stds = params[3+npeaks:3+2*npeaks]
+                modeled_vals = self._poisson_gaussians(x,
+                                                       photon_energy, 
+                                                       stds, 
+                                                       num_photons, 
+                                                       height,
+                                                       n_gaussians=npeaks)     
+            else:         
+                photon_energy = params[0]
+                stds = params[1:1+npeaks]
+                heights = params[1+npeaks:1+2*npeaks]
+                modeled_vals = self._non_poisson_gaussians(x,
+                                                        photon_energy,
+                                                        stds,
+                                                        heights,
+                                                        n_gaussians=npeaks)
+        else:
+            if poisson == True:
+                raise ValueError('Cannot define a poisson-distributed spectrum' \
+                'with floating means')
+            else:
+                means = params[:npeaks]
+                stds = params[npeaks:2*npeaks]
+                heights = params[2*npeaks:3*npeaks]
+                modeled_vals = self._free_gaussians(x,
+                                                    means,
+                                                    stds,
+                                                    heights,
+                                                    n_gaussians=npeaks)
+
+
         return modeled_vals
-    
-    def fit_spectrum(self, amp_rq, cut_rq, model='poisson',
+
+
+    def fit_spectrum(self, amp_rq, cut_rq,
+                     poisson = False, 
+                     eqspacing = True,
+                     npeaks = 5,
                      guess = None, bounds=None, 
                      bins = 200,
-                    lgc_plot=True, lgc_ylog=True, lgc_diagnostics=False):
+                     lgc_plot=True, lgc_ylog=True, lgc_diagnostics=False):
         """
-        Fits an energy-like (i.e. OFAmp) spectrum from photon calibration data.
-        
+        Fits the amplitude spectrum to a series of gaussians"
+
         Parameters
         ----------
-        amp_rq : string
-            The name of the RQ that will be used as a proxy of the amplitude
-            of the pulses, from which a histogram will be constructed and fit.
-            E.g. "amp_of1x1_nodelay_Melange1pc1ch"
-            
-        cut_rq : string
-            The name of the RQ that will be used to select good events. This
-            will usually be a "cut_all" object generated fron MasterSemiAutocuts.
-            E.g. "cut_all_Melange025pcLeft"
 
-        model : string, optional
-            The name of the model to fit to the pulse heights spectrum. Defaults
-            to "poisson", which fits the data to a Poisson distribution. Other
-            models include: "two_gaus", "three_gaus", "four_gaus", "five_gaus"
-            where each Gaussian centroid and width is fit independently.
-            
-        guess : array, optional
-            Guess given to the fitting algorithim.
-            
-        bounds : 2 arrays, optional
-            bounds given to the scipy least_squares fitting algorithm. If None,
-            the bounds are automatically generated based on the guess.
-            
-        bins : int or array, optional
-            Number or array of bins used to construct the spectrum which is fit.
-            Passed to np.histogram.
-            
-        lgc_plot : bool, optional
-            If True, displays plots showing the fits to the spectrum.
-            
-        lgc_ylog : bool, optional
-            If True, sets the y scale of the diagnostic plot(s) to log scale.
-            
-        lgc_diagnostics : bool, optional
-            Prints out diagnostic messages if True.
+        amp_rq : string
+            prescribes which vaex dataframe column will be used as a proxy for energy    
+        cut_rq : string
+            which vaex dataframe column will be used as a cut
+        poisson : bool
+            whether or not the gaussians' areas should obey poisson statistics
+        eqspacing : bool
+            whether or not the gaussians' means should be evenly spaced
+        npeaks : int
+            the number of peaks to model
+        guess : list
+            list of initial guesses for parameters. Formatting depends on choices for
+            poisson and eqspacing arguments
+        bounds : list of lists
+            list of two lists; the former prescribes lower bounds about the our guesses;
+            the latter upper bounds. If not given, default bounds are calculated based on 
+            guess    
+        bins : int
+            the number of bins with which to generate the histogram
+        lgc_plot : bool
+            whether to generate a plot
+        lgc_ylog : bool
+            if lgc_plot, whether the generate the y-axis in log-space
         
+        lgc_diagnoistics
         
         Returns
         -------
-        popt : numpy array
-            Array of the fit values from the model
-            
-        pcov : numpy array
-            Covariance matrix for the fit model
-            
-        pstds : numpy array
-            Array of the standard deviations of the fit model values
-
+        fig, ax : pyplot objects
         """
         
         self.amp_rq = amp_rq
         self.cut_rq = cut_rq
         self.spectrum_bins = bins
+
         
+
         if (guess is None):
-            if model == 'poisson' :
-                #sets the default guess, if the model is poisson
-                guess = [self.photon_energy_ev*0.4e-8, 2.0, 0.25e-8, 1000]
-            elif model == 'two_gaus':
-                guess = [500, 0.0, 0.25e-8,
-                         200, self.photon_energy_ev*0.4e-8, 0.25e-8]
-            elif model == 'three_gaus':
-                guess = [800, 0.0, 0.25e-8,
-                         500, self.photon_energy_ev*0.4e-8, 0.25e-8,
-                         200, 2 * self.photon_energy_ev*0.4e-8, 0.25e-8]
-            elif model == 'four_gaus':
-                guess = [800, 0.0, 0.25e-8,
-                         500, self.photon_energy_ev*0.4e-8, 0.25e-8,
-                         200, 2 * self.photon_energy_ev*0.4e-8, 0.25e-8,
-                         50, 3 * self.photon_energy_ev*0.4e-8, 0.25e-8]
-            elif model == 'five_gaus':
-                guess = [800, 0.0, 0.25e-8,
-                         500, self.photon_energy_ev*0.4-7, 0.25e-8,
-                         200, 2 * self.photon_energy_ev*0.4e-8, 0.25e-8,
-                         50, 3 * self.photon_energy_ev*0.4e-8, 0.25e-8,
-                         50, 4 * self.photon_energy_ev*0.4e-8, 0.25e-8]
-                
-        if bounds is None:
-            if model == 'poisson' :
-                #sets the default guess, if the model is poisson
-                bounds = [[0.5*guess[0], 0.5*guess[1], 0.75*guess[2], 0.75*guess[3]],
-                          [1.5*guess[0], 1.5*guess[1], 1.25*guess[2], 1.25*guess[3]]]
-            elif model == 'two_gaus':
-                bounds = [[0.5*guess[0], guess[1] - 0.5*guess[2], 0.75*guess[2],
-                           0.5*guess[3], 0.5*guess[4], 0.75*guess[5]],
-                          
-                          [1.5*guess[0], guess[1] + 0.5*guess[2], 1.25*guess[2],
-                           1.5*guess[3], 1.5*guess[4], 1.25*guess[5]]]
-            elif model == 'three_gaus':
-                bounds = [[0.5*guess[0], guess[1] - 0.5*guess[2], 0.75*guess[2],
-                           0.5*guess[3], 0.5*guess[4], 0.75*guess[5],
-                           0.5*guess[6], 0.5*guess[7], 0.75*guess[8]],
-                          
-                          [1.5*guess[0], guess[1] + 0.5*guess[2], 1.25*guess[2],
-                           1.5*guess[3], 1.5*guess[4], 1.25*guess[5],
-                           1.5*guess[6], 1.5*guess[7], 1.25*guess[8]]]
-            elif model == 'four_gaus':
-                bounds = [[0.5*guess[0], guess[1] - 0.5*guess[2], 0.75*guess[2],
-                           0.5*guess[3], 0.5*guess[4], 0.75*guess[5],
-                           0.5*guess[6], 0.5*guess[7], 0.75*guess[8],
-                           0.5*guess[9], 0.5*guess[10], 0.75*guess[11]],
-                          
-                          [1.5*guess[0], guess[1] + 0.5*guess[2], 1.25*guess[2],
-                           1.5*guess[3], 1.5*guess[4], 1.25*guess[5],
-                           1.5*guess[6], 1.5*guess[7], 1.25*guess[8],
-                           1.5*guess[9], 1.5*guess[10], 1.25*guess[11]]]
-            elif model == 'five_gaus':
-                bounds = [[0.5*guess[0], guess[1] - 0.5*guess[2], 0.75*guess[2],
-                           0.5*guess[3], 0.5*guess[4], 0.75*guess[5],
-                           0.5*guess[6], 0.5*guess[7], 0.75*guess[8],
-                           0.5*guess[9], 0.5*guess[10], 0.75*guess[11],
-                           0.5*guess[12], 0.5*guess[13], 0.75*guess[14]],
-                          
-                          [1.5*guess[0], guess[1] + 0.5*guess[2], 1.25*guess[2],
-                           1.5*guess[3], 1.5*guess[4], 1.25*guess[5],
-                           1.5*guess[6], 1.5*guess[7], 1.25*guess[8],
-                           1.5*guess[9], 1.5*guess[10], 1.25*guess[11],
-                           1.5*guess[12], 1.5*guess[13], 1.25*guess[14]]]
+            if eqspacing:
+                if poisson:
+                    mean_guess = [self.photon_ev*0.4e-8]
+                    std_guess = [0.25e-8 for _ in range(npeaks)]
+                    height_guess = [1, 1000] #mean no of photons; peak 1 height
+                else:
+                    mean_guess = [self.photon_ev*0.4e-8]
+                    std_guess = [0.25e-8 for _ in range(npeaks)]
+                    height_guess = [1000 for _ in range(npeaks)]
+            else:
+                if poisson:
+                    raise ValueError('If eqspacing is False, poisson must also be false')
+                else:
+                    mean_guess = [i*1e-8 for i in range(npeaks)]
+                    std_guess = [0.25e-8 for _ in range(npeaks)]
+                    height_guess = [1000 for _ in range(npeaks)]
             
-         
-        event_heights = self.calibration_df[self.calibration_df[cut_rq]][amp_rq].values
+            guess = mean_guess + std_guess + height_guess
+        if bounds is None:
+            if eqspacing:
+                if poisson:
+                    mean_guess = guess[:1]
+                    std_guess = guess[1:1+npeaks]
+                    height_guess = guess[-2:]
+                    mean_bounds = [[.5*guess for guess in mean_guess],
+                                   [1.5*guess for guess in mean_guess]]
+       
+                    std_bounds = [[.5*guess for guess in std_guess],
+                                  [1.5*guess for guess in std_guess]]
+                    
+                    height_bounds = [[0.25*height_guess[0], 0.5*height_guess[1]],
+                                     [2.0*height_guess[0], 1.5*height_guess[1]]]
+                else : 
+                    mean_guess = guess[:1]
+                    std_guess = guess[1:1+npeaks]
+                    height_guess = guess[-1*npeaks:]
+
+                    mean_bounds = [[.5*guess for guess in mean_guess],
+                                   [1.5*guess for guess in mean_guess]]
+       
+                    std_bounds = [[.5*guess for guess in std_guess],
+                                  [1.5*guess for guess in std_guess]]    
+       
+                    height_bounds = [[.25*guess for guess in height_guess],
+                                     [2.0*guess for guess in height_guess]]           
+            else:
+                mean_guess = guess[:npeaks]
+                std_guess = guess[npeaks:2*npeaks]
+                height_guess = guess[2*npeaks:3*npeaks]
+
+                mean_bounds = [[.5*guess for guess in mean_guess],
+                               [1.5*guess for guess in mean_guess]]
+                
+                std_bounds = [[.5*guess for guess in std_guess],
+                              [1.5*guess for guess in std_guess]]    
+    
+                height_bounds = [[.25*guess for guess in height_guess],
+                                 [2.0*guess for guess in height_guess]]   
+
+        bounds = []
+
+        bounds.append(mean_bounds[0] + std_bounds[0] + height_bounds[0])
+        bounds.append(mean_bounds[1] + std_bounds[1] + height_bounds[1])
+
+        event_amps = self.calibration_df[self.calibration_df[cut_rq]][amp_rq].values
         if lgc_diagnostics:
-            print("Event heights: " + str(event_heights))
-            print("Number of events: " + str(len(event_heights)))
+            print("Event amps: " + str(event_amps))
+            print("Number of events: " + str(len(event_amps)))
             print(" ")
         
-        spectrum_vals, spectrum_bins = np.histogram(event_heights, bins)
-        spectrum_bins = spectrum_bins[:-1]
-        offset = 0.5 * (spectrum_bins[1] - spectrum_bins[0])
+        spectrum_vals, spectrum_bin_edges = np.histogram(event_amps, bins)
+        spectrum_bin_centers = (spectrum_bin_edges[1:] + spectrum_bin_edges[:-1])/2
+        
+        plot_bins = np.linspace(np.min(spectrum_bin_edges), np.max(spectrum_bin_edges), 1000)
+
         if lgc_diagnostics:
             
             print("Guess: " + str(guess))
             
-            modeled_vals = self._model_spectrum(spectrum_bins + offset, model, guess)
-
-            plt.title("Initial State")
-            plt.step(spectrum_bins, spectrum_vals, label='Values')
-            plt.plot(spectrum_bins, modeled_vals, label = "Guessed Model")
+            modeled_vals = self._model_spectrum(plot_bins, 
+                                                guess,
+                                                poisson=poisson,
+                                                eqspacing=eqspacing,
+                                                npeaks = npeaks)
+            fig, ax = plt.subplots()
+            ax.set_title("Initial State")
+            ax.step(spectrum_bin_edges[:-1], spectrum_vals, label='Values')
+            ax.plot(plot_bins, modeled_vals, label = "Guessed Model")
             if lgc_ylog:
-                plt.ylim(1e-1, 1.25*max(spectrum_vals))
-                plt.yscale('log')
-            plt.legend()
-            plt.xlabel(amp_rq)
-            plt.ylabel("Counts Per Bin")
-            plt.show()
-            
+                ax.set_ylim(1e-1, 1.25*max(spectrum_vals))
+                ax.set_yscale('log')
+            ax.legend()
+            ax.xlabel(amp_rq)
+            ax.ylabel("Counts Per Bin")
+
+            return fig, ax            
         
         def _resid(params):
-            modeled_vals = self._model_spectrum(spectrum_bins + offset, model, params)
+            modeled_vals = self._model_spectrum(spectrum_bin_centers, 
+                                                params,
+                                                poisson=poisson,
+                                                eqspacing=eqspacing,
+                                                npeaks = npeaks)
             
             weights = np.reciprocal(np.sqrt(spectrum_vals))
             weights[spectrum_vals == 0] = 0
@@ -529,11 +551,16 @@ class PhotonCalibration:
             result_params = result['x']
             
             
-            modeled_vals = self._model_spectrum(spectrum_bins + offset, model, result_params)
+            modeled_vals = self._model_spectrum(plot_bins, 
+                                                result_params,
+                                                poisson=poisson,
+                                                eqspacing=eqspacing,
+                                                npeaks = npeaks)
+            
             
             plt.title("Final State")
-            plt.step(spectrum_bins, spectrum_vals, label='Values')
-            plt.plot(spectrum_bins, modeled_vals, label = "Fit Model")
+            plt.step(spectrum_bin_edges[:-1], spectrum_vals, label='Values')
+            plt.plot(plot_bins, modeled_vals, label = "Fit Model")
             if lgc_ylog:
                 plt.ylim(1e-1, 1.25*max(spectrum_vals))
                 plt.yscale('log')
@@ -543,8 +570,8 @@ class PhotonCalibration:
             plt.show()
             
             plt.title("Residuals")
-            plt.plot(spectrum_bins, result['fun'], marker = 'o', linestyle='none')
-            plt.hlines([0], min(spectrum_bins), max(spectrum_bins))
+            plt.plot(spectrum_bin_centers, result['fun'], marker = 'o', linestyle='none')
+            plt.hlines([0], min(spectrum_bin_centers), max(spectrum_bin_centers))
             plt.ylabel("Residual (Sigma)")
             plt.show()
             
@@ -558,87 +585,28 @@ class PhotonCalibration:
             print(" ")
             print("-----------")
             print("Fit Results: ")
-            if model == "poisson":
+            if poisson:
                 print("Peak spacing: " + str(popt[0]) + " +/- " + str(pstds[0]))
-                print("Mean number of photons per pulse: " + str(popt[1]) + " +/- " + str(pstds[1]))
-                print("Peak width: " + str(popt[2]) + " +/- " + str(pstds[2]))
-                print("Total height: " + str(popt[3]) + " +/- " + str(pstds[3]))
-            elif model == 'two_gaus':
-                print("Gaussian 1:")
-                print("Peak height: " + str(popt[0]) + " +/- " + str(pstds[0]))
-                print("Peak mean: " + str(popt[1]) + " +/- " + str(pstds[1]))
-                print("Peak width: " + str(popt[2]) + " +/- " + str(pstds[2]))
-                print(" ")
-                print("Gaussian 2:")
-                print("Peak height: " + str(popt[3]) + " +/- " + str(pstds[3]))
-                print("Peak mean: " + str(popt[4]) + " +/- " + str(pstds[4]))
-                print("Peak width: " + str(popt[5]) + " +/- " + str(pstds[5]))
-                print(" ")
-            elif model == 'three_gaus':
-                print("Gaussian 1:")
-                print("Peak height: " + str(popt[0]) + " +/- " + str(pstds[0]))
-                print("Peak mean: " + str(popt[1]) + " +/- " + str(pstds[1]))
-                print("Peak width: " + str(popt[2]) + " +/- " + str(pstds[2]))
-                print(" ")
-                print("Gaussian 2:")
-                print("Peak height: " + str(popt[3]) + " +/- " + str(pstds[3]))
-                print("Peak mean: " + str(popt[4]) + " +/- " + str(pstds[4]))
-                print("Peak width: " + str(popt[5]) + " +/- " + str(pstds[5]))
-                print(" ")
-                print("Gaussian 3:")
-                print("Peak height: " + str(popt[6]) + " +/- " + str(pstds[6]))
-                print("Peak mean: " + str(popt[7]) + " +/- " + str(pstds[7]))
-                print("Peak width: " + str(popt[8]) + " +/- " + str(pstds[8]))
-                print(" ")
-            elif model == 'four_gaus':
-                print("Gaussian 1:")
-                print("Peak height: " + str(popt[0]) + " +/- " + str(pstds[0]))
-                print("Peak mean: " + str(popt[1]) + " +/- " + str(pstds[1]))
-                print("Peak width: " + str(popt[2]) + " +/- " + str(pstds[2]))
-                print(" ")
-                print("Gaussian 2:")
-                print("Peak height: " + str(popt[3]) + " +/- " + str(pstds[3]))
-                print("Peak mean: " + str(popt[4]) + " +/- " + str(pstds[4]))
-                print("Peak width: " + str(popt[5]) + " +/- " + str(pstds[5]))
-                print(" ")
-                print("Gaussian 3:")
-                print("Peak height: " + str(popt[6]) + " +/- " + str(pstds[6]))
-                print("Peak mean: " + str(popt[7]) + " +/- " + str(pstds[7]))
-                print("Peak width: " + str(popt[8]) + " +/- " + str(pstds[8]))
-                print(" ")
-                print("Gaussian 4:")
-                print("Peak height: " + str(popt[9]) + " +/- " + str(pstds[9]))
-                print("Peak mean: " + str(popt[10]) + " +/- " + str(pstds[10]))
-                print("Peak width: " + str(popt[11]) + " +/- " + str(pstds[11]))
-                print(" ")
-            elif model == 'five_gaus':
-                print("Gaussian 1:")
-                print("Peak height: " + str(popt[0]) + " +/- " + str(pstds[0]))
-                print("Peak mean: " + str(popt[1]) + " +/- " + str(pstds[1]))
-                print("Peak width: " + str(popt[2]) + " +/- " + str(pstds[2]))
-                print(" ")
-                print("Gaussian 2:")
-                print("Peak height: " + str(popt[3]) + " +/- " + str(pstds[3]))
-                print("Peak mean: " + str(popt[4]) + " +/- " + str(pstds[4]))
-                print("Peak width: " + str(popt[5]) + " +/- " + str(pstds[5]))
-                print(" ")
-                print("Gaussian 3:")
-                print("Peak height: " + str(popt[6]) + " +/- " + str(pstds[6]))
-                print("Peak mean: " + str(popt[7]) + " +/- " + str(pstds[7]))
-                print("Peak width: " + str(popt[8]) + " +/- " + str(pstds[8]))
-                print(" ")
-                print("Gaussian 4:")
-                print("Peak height: " + str(popt[9]) + " +/- " + str(pstds[9]))
-                print("Peak mean: " + str(popt[10]) + " +/- " + str(pstds[10]))
-                print("Peak width: " + str(popt[11]) + " +/- " + str(pstds[11]))
-                print(" ")
-                print("Gaussian 5:")
-                print("Peak height: " + str(popt[12]) + " +/- " + str(pstds[12]))
-                print("Peak mean: " + str(popt[13]) + " +/- " + str(pstds[13]))
-                print("Peak width: " + str(popt[14]) + " +/- " + str(pstds[14]))
-                print(" ")
-        
-        self.photon_fit_model = model
+                for i in range(npeaks):
+                    print(f'Peak {i} width: ' + str(popt[1+i]) + ' +/- ' + str(pstds[1+i]))
+
+                print("Mean number of photons per pulse: " + str(popt[-2]) + " +/- " + str(pstds[-2]))
+                print("Peak 0 height: " + str(popt[-1]) + " +/- " + str(pstds[-1]))
+            else:
+                if eqspacing:
+                    print("Peak spacing: " + str(popt[0]) + " +/- " + str(pstds[0]))
+                    for i in range(npeaks):
+                        print(f'Peak {i} width: ' + str(popt[1+i]) + ' +/- ' + str(pstds[1+i]))
+                        print(f'Peak {i} height: ' + str(popt[1+npeaks+i]) + ' +/-'  + str(pstds[1+npeaks+i]))
+                else:
+                    for i in range(npeaks):
+                        print(f'Peak {i} spacing: ' + str(popt[i]) + " +/- " + str(pstds[i]))
+                        print(f'Peak {i} width: ' + str(popt[i+npeaks]) + ' +/- ' + str(pstds[i+npeaks]))
+                        print(f'Peak {i} height: ' + str(popt[1+2*npeaks]) + ' +/-'  + str(pstds[1+2*npeaks]))
+
+        self.npeaks_model = npeaks
+        self.poisson_model = poisson
+        self.eqspacing_model = eqspacing
         self.photon_fit_popt = popt
         self.photon_fit_cov = pcov
         
@@ -676,31 +644,41 @@ class PhotonCalibration:
             photon_energy = self.photon_energy_ev
         else:
             photon_energy = self.photon_energy_j
-        model = self.photon_fit_model
+
+        eqspacing = self.eqspacing_model
+        npeaks = self.npeaks_model
+        poisson = self.poisson_model
         popt = self.photon_fit_popt
         pcov = self.photon_fit_cov
         
-        if model == 'poisson':
+        #Here we're propagating fit error (as measured by the fit covariance)
+        #into the energy resolution. Only derivatives in relevant fit parameters
+        #computed
+        if eqspacing:
             peak_spacing = popt[0]
             peak_width = popt[2]
             energy_res = photon_energy * peak_width/peak_spacing
-            jacobian = np.zeros(len(popt))
-            jacobian[0] = -photon_energy * peak_width * peak_spacing**-2
-            jacobian[2] = photon_energy / peak_spacing
-            energy_res_err = np.sqrt(np.matmul(jacobian, np.matmul(pcov, np.transpose(jacobian))))
+            gradient = np.zeros(len(popt))
+            gradient[0] = -photon_energy * peak_width / peak_spacing**-2
+            gradient[2] = photon_energy / peak_spacing
+            energy_res_err = np.sqrt(gradient @ (pcov @ gradient))
         else:
-            peak_spacing = popt[4] - popt[1]
-            peak_width = popt[2]
+            peak_spacing = popt[1] - popt[0]
+            peak_width = popt[npeaks+1]
             energy_res = photon_energy * peak_width/peak_spacing
-            jacobian = np.zeros(len(popt))
-            jacobian[1] = photon_energy * peak_width * peak_spacing**-2
-            jacobian[4] = -photon_energy * peak_width * peak_spacing**-2
-            jacobian[2] = photon_energy / peak_spacing
-            energy_res_err = np.sqrt(np.matmul(jacobian, np.matmul(pcov, np.transpose(jacobian))))
+            gradient = np.zeros(len(popt))
+            gradient[npeaks+1] = photon_energy / peak_spacing
+            gradient[0] = photon_energy * peak_width / peak_spacing**-2
+            gradient[1] = -photon_energy * peak_width / peak_spacing**-2
+            energy_res_err = np.sqrt(gradient @ (pcov @ gradient))
         
         if lgc_print:
-            print("Model used to fit peaks: " + str(model))
-            print("Measuring energy resolution using photon energy")
+            print(f'{npeaks} fit')
+            if poisson:
+                print('Peak areas are assumed to obey poisson statistics')
+            if eqspacing:
+                print('Inter-peak spacing is assumed to be uniform')
+            print("Measuring energy resolution using single-photon energy")
             print("and peak width relative to peak spacing in OFAmp")
             
             print(" ")
@@ -727,7 +705,9 @@ class PhotonCalibration:
         
         Returns
         ------- 
+        fig : Figure
 
+        ax : axes
         """
 
         amp_rq = self.amp_rq
@@ -737,35 +717,39 @@ class PhotonCalibration:
 
         event_heights = self.calibration_df[self.calibration_df[cut_rq]][amp_rq].values
         
-        spectrum_vals, spectrum_bins = np.histogram(event_heights, bins)
-        spectrum_bins = spectrum_bins[:-1]
+        spectrum_vals, spectrum_bin_edges = np.histogram(event_heights, bins)
+        spectrum_bin_centers = (spectrum_bin_edges[1:] + spectrum_bin_edges[:-1])/2
 
-        model = self.photon_fit_model
+        poisson = self.poisson_model
+        eqspacing = self.eqspacing_model
+        npeaks = self.npeaks_model
         popt = self.photon_fit_popt
-        pcov = self.photon_fit_cov
         photon_energy = self.photon_energy_ev
         
-        offset = 0.5 * (spectrum_bins[1] - spectrum_bins[0])
-        modeled_vals = self._model_spectrum(spectrum_bins + offset, model, popt)
+        modeled_vals = self._model_spectrum(spectrum_bin_centers,
+                                            popt,
+                                            poisson = poisson,
+                                            npeaks = npeaks,
+                                            eqspacing = eqspacing)
         
-
-        if model == 'poisson':
+        if eqspacing:
             peak_spacing = popt[0]
             peak_width = popt[2]
-            hist_scale = photon_energy/peak_spacing
         else:
-            peak_spacing = popt[4] - popt[1]
-            peak_width = popt[2]
-            hist_scale = photon_energy/peak_spacing
+            peak_spacing = popt[1] - popt[0]
+            peak_width = popt[npeaks+1]
+        hist_scale = photon_energy/peak_spacing
 
+        fig, ax = plt.subplots()
     
-        plt.title("Final State")
-        plt.step(spectrum_bins*hist_scale, spectrum_vals, label='Values', linewidth=2.5, color = 'Blue')
-        plt.plot(spectrum_bins*hist_scale, modeled_vals, label = "Fit Model", linewidth = 2.0, linestyle = 'dashed', color = 'deeppink')
-        #plt.legend()
-        plt.xlabel("Calibrated Energy in Crystal Phonon System (eV)")
-        plt.ylabel("Events Per Bin")
+        ax.set_title("Final State", fontsize = 14)
+        ax.step(spectrum_bin_edges[:-1]*hist_scale, spectrum_vals, label='Values', linewidth=2.5, color = 'Blue')
+        ax.plot(spectrum_bin_centers*hist_scale, modeled_vals, label = "Fit Model", linewidth = 2.0, linestyle = 'dashed', color = 'deeppink')
+        ax.set_xlabel("Calibrated Energy in Crystal Phonon System (eV)", fontsize = 12)
+        ax.set_ylabel("Events Per Bin", fontsize = 12)
+        ax.legend()
 
+        return fig, ax 
 
             
         
@@ -808,33 +792,14 @@ class PhotonCalibration:
         """
         
         #define the center position of the peak to select
-        if self.photon_fit_model == 'poisson':
+        if peak_number > self.npeaks_model - 1:
+            raise ValueError(f'Only {self.npeaks_model} were modelled; choose an appropriate peak number')
+        if self.eqspacing_model:
             peak_center = self.photon_fit_popt[0] * peak_number
-            peak_width = self.photon_fit_popt[2]
-        elif self.photon_fit_model == 'two_gaus':
-            if peak_number > 1:
-                print("For a two Gaussian fit, the peak number must be one or less")
-            else:
-                peak_center = self.photon_fit_popt[int(3 * peak_number + 1)]
-                peak_width = self.photon_fit_popt[int(3 * peak_number + 2)]
-        elif self.photon_fit_model == 'three_gaus':
-            if peak_number > 2:
-                print("For a three Gaussian fit, the peak number must be two or less")
-            else:
-                peak_center = self.photon_fit_popt[int(3 * peak_number + 1)]
-                peak_width = self.photon_fit_popt[int(3 * peak_number + 2)]
-        elif self.photon_fit_model == 'four_gaus':
-            if peak_number > 3:
-                print("For a four Gaussian fit, the peak number must be three or less")
-            else:
-                peak_center = self.photon_fit_popt[int(3 * peak_number + 1)]
-                peak_width = self.photon_fit_popt[int(3 * peak_number + 2)]
-        elif self.photon_fit_model == 'five_gaus':
-            if peak_number > 4:
-                print("For a five Gaussian fit, the peak number must be four or less")
-            else:
-                peak_center = self.photon_fit_popt[int(3 * peak_number + 1)]
-                peak_width = self.photon_fit_popt[int(3 * peak_number + 2)]
+            peak_width = self.photon_fit_popt[1 + peak_number]
+        else:
+            peak_center = self.photon_fit_popt[peak_number]
+            peak_width = self.photon_fit_popt[peak_number + self.npeaks_model]
         
         cut_width = peak_width * width_sigma
         if lgc_diagnostics:
@@ -867,7 +832,6 @@ class PhotonCalibration:
         cut_pars = {'val_lower': peak_center - cut_width, 'val_upper': peak_center + cut_width,}
 	
         cut_rq_override_bool = (cut_rq is not None)
-        import detanalysis as da
         photon_cut = da.Semiautocut(self.calibration_df, cut_rq=self.amp_rq,
                                    channel_name=self.channel_name,
                                    cut_pars=cut_pars, cut_name=cut_name,
@@ -1316,7 +1280,7 @@ class PhotonCalibration:
             plt.xlim(time_lims[0]*1e3, time_lims[1]*1e3)
             plt.show()
             
-    def calculate_dPdI(self, didv_result=None, lgc_plot=False):
+    def calculate_dPdI(self, didv_result, lgc_plot=False):
         """
         Calculates the dPdI from either the dIdV result associated with
         the object, or with the one supplied.
@@ -1333,14 +1297,42 @@ class PhotonCalibration:
             calculating the dPdI.
         """
         
-        if didv_result is None:
-            didv_result = self.didv_result
+
             
         if self.freqs is None:
             self.freqs = fftfreq(len(self.t_arr), 1/self.fs)
             
         self.dpdi, self.dpdi_err = get_dPdI_with_uncertainties(self.freqs, didv_result, lgcplot=lgc_plot)
-        
+
+    def _extract_dPdI(self, didv_result=None):
+        """
+        Helper function that reads in dpdi from the user-given 
+        filter file.
+
+        Parameters
+        ----------
+
+        didv_result : 
+            Optional didv_result with which to calculate dpdi from didv.
+            If not passed, dPdI is read in from the filter file specified
+            at the time of the the PhotonCalibration object's instantiation.
+            
+
+        """
+        if didv_result is None:
+            filter_io = h5io.FilterH5IO(self.filterfile_path)
+            didv_dataframe = filter_io.load()
+            dpdi_vals_tag = f'dpdi_{self.npoles}poles_{self.dpdi_tag}'
+            dpdi_errs_tag = f'dpdi_err_{self.npoles}poles_{self.dpdi_tag}'
+
+            self.dpdi = np.array(didv_dataframe[self.channel_name][dpdi_vals_tag])
+            self.dpdi_err = np.array(didv_dataframe[self.channel_name][dpdi_errs_tag])\
+            
+        else:
+            self.dpdi, self.dpdi_err = get_dPdI_with_uncertainties(self.freqs, didv_result)
+
+
+
     def calculate_frequency_domain_templates(self, lgc_plot=False, 
                                              filter_freq=50e3, time_lims=[4.9e-3, 5.5e-3]):
         """
@@ -1350,10 +1342,6 @@ class PhotonCalibration:
         Parameters:
         -----------
         
-        didv_result : qetpy dIdV result object, optional
-            If supplied, supplants the dIdV object that's part of
-            the photon calibration object for calculating the dPdI
-            
         lgc_plot : bool, optional
             If True, displays the diagnostic plots associated with
             calculating the dPdI.
@@ -1488,518 +1476,87 @@ class PhotonCalibration:
             plt.legend()
             plt.show()
             
-            
-            
-    def _get_onepulse_t_template(self, amp_1, fall_1, rise,
-                                 t_arr=None, start_time=None, fs=1.25e6):
-        """
-        Calculates the time domain one pulse template fit to the photon
-        calibration data in the power domain.
-        
-        Parameters:
-        -----------
-        
-        amp_1 : float
-            The amplitude of the first pulse
-            
-        fall_1 : float
-            The fall time of the first pulse
-            
-        rise : float
-            The rise time of the pulse
-            
-        dt : float
-            The difference between the trigger time and the
-            true rise time of the calibration pulses.
-
-        t_arr : array, optional
-            If not None, used to generate the modeled template
-            at these times.
-
-        start_time : float, optional
-            If not None, used instead of the internal start time
-            for the start time for the pulse.
-        """
-
+    def _get_twopole_t_template(self, amp1, fall_1, rise,
+                                t_arr=None, start_time=None, fs = 1.25e6):
         if t_arr is None:
             t_arr = self.t_arr
-
+        
         if start_time is None:
             start_time = self.pretrigger_window + self.dt
-        
-        pulse_1 = make_template_twopole(t_arr, A = 1.0, 
+
+        pulse_1 = make_template_twopole(t_arr, A = amp1,
                                         tau_r=rise, tau_f=fall_1,
                                         t0=start_time,
-                                        fs=fs) * amp_1
-        
+                                        fs=fs, normalize = False)
+
         if np.isnan(pulse_1).any() or np.isinf(pulse_1).all():
             pulse_1 = np.zeros(len(pulse_1), dtype = np.float64)
         
         return pulse_1
     
-    def _get_onepulse_f_template(self, amp_1, fall_1, rise,
+    def _get_twopole_f_template(self, amp_1, fall_1, rise,
                                  t_arr=None, start_time=None, fs=1.25e6):
-        """
-        Calculates the frequency domain two pulse template fit to the photon
-        calibration data in the power domain.
-        
-        Parameters:
-        -----------
-        
-        amp_1 : float
-            The amplitude of the pulse
             
-        fall_1 : float
-            The fall time of the pulse
-            
-        rise : float
-            The rise time of the pulse
-            
-        dt : float
-            The difference between the trigger time and the
-            true rise time of the calibration pulses.
-
-        t_arr : array, optional
-            If not None, used to generate the modeled template
-            at these times.
-
-        start_time : float, optional
-            If not None, used instead of the internal start time
-            for the start time for the pulse.
-        """
-            
-        template_t = self._get_onepulse_t_template(amp_1, fall_1, rise, t_arr, start_time, fs=fs)
+        template_t = self._get_twopole_t_template(amp_1, fall_1, rise, t_arr, start_time, fs=fs)
         
         return fft(template_t)/np.sqrt(len(template_t) * fs)
+
     
-    def _get_twopulse_t_template(self, amp_1, amp_2, fall_1, fall_2, rise,
+    def _get_threepole_t_template(self, amp1, amp2, fall_1, fall_2, rise,
+                                t_arr=None, start_time=None, fs = 1.25e6):
+        if t_arr is None:
+            t_arr = self.t_arr
+        
+        if start_time is None:
+            start_time = self.pretrigger_window + self.dt
+
+        pulse = make_template_threepole(t_arr, A = amp1, B = amp2,
+                                        tau_r=rise, tau_f1=fall_1,
+                                        tau_f2 = fall_2,
+                                        t0=start_time,
+                                        fs=fs, normalize = False)
+
+        if np.isnan(pulse).any() or np.isinf(pulse).all():
+            pulse = np.zeros(len(pulse), dtype = np.float64)
+        
+        return pulse                
+
+    def _get_threepole_f_template(self, amp_1, amp_2, fall_1, fall_2, rise,
                                  t_arr=None, start_time=None, fs=1.25e6):
-        """
-        Calculates the time domain two pulse template fit to the photon
-        calibration data in the power domain.
-        
-        Parameters:
-        -----------
-        
-        amp_1 : float
-            The amplitude of the first pulse
             
-        amp_2 : float
-            The amplitude of the second pulse
-            
-        fall_1 : float
-            The fall time of the first pulse
-            
-        fall_2 : float
-            The fall time of the second pulse
-            
-        rise : float
-            The rise time of the two pulses
-            
-        dt : float
-            The difference between the trigger time and the
-            true rise time of the calibration pulses.
-
-        t_arr : array, optional
-            If not None, used to generate the modeled template
-            at these times.
-
-        start_time : float, optional
-            If not None, used instead of the internal start time
-            for the start time for the pulse.
-        """
-
-        if t_arr is None:
-            t_arr = self.t_arr
-
-        if start_time is None:
-            start_time = self.pretrigger_window + self.dt
-        
-        pulse_1 = make_template_twopole(t_arr, A = 1.0, 
-                                        tau_r=rise, tau_f=fall_1,
-                                        t0=start_time,
-                                        fs=fs) * amp_1
-
-        pulse_2 = make_template_twopole(t_arr, A = 1.0, 
-                                         tau_r=rise, tau_f=fall_2,
-                                         t0=start_time,
-                                         fs=fs) * amp_2
-        
-        if np.isnan(pulse_1).any() or np.isinf(pulse_1).all():
-            pulse_1 = np.zeros(len(pulse_1), dtype = np.float64)
-        if np.isnan(pulse_2).any() or np.isinf(pulse_2).all():
-            pulse_2 = np.zeros(len(pulse_2), dtype = np.float64)
-        
-        return pulse_1 + pulse_2
-    
-    def _get_twopulse_f_template(self, amp_1, amp_2, fall_1, fall_2, rise,
-                                 t_arr=None, start_time=None, fs=1.25e6):
-        """
-        Calculates the frequency domain two pulse template fit to the photon
-        calibration data in the power domain.
-        
-        Parameters:
-        -----------
-        
-        amp_1 : float
-            The amplitude of the first pulse
-            
-        amp_2 : float
-            The amplitude of the second pulse
-            
-        fall_1 : float
-            The fall time of the first pulse
-            
-        fall_2 : float
-            The fall time of the second pulse
-            
-        rise : float
-            The rise time of the two pulses
-            
-        dt : float
-            The difference between the trigger time and the
-            true rise time of the calibration pulses.
-
-        t_arr : array, optional
-            If not None, used to generate the modeled template
-            at these times.
-
-        start_time : float, optional
-            If not None, used instead of the internal start time
-            for the start time for the pulse.
-        """
-            
-        template_t = self._get_twopulse_t_template(amp_1, amp_2, fall_1, fall_2, rise, t_arr, start_time, fs=fs)
+        template_t = self._get_threepole_t_template(amp_1, amp_2, fall_1, fall_2, rise, t_arr, start_time, fs=fs)
         
         return fft(template_t)/np.sqrt(len(template_t) * fs)
     
-    def _get_deltapulse_t_template(self, amp_1, amp_2, fall_2, rise, t_arr=None, start_time=None, fs=1.25e6):
-        """
-        Calculates the time domain delta function plus single exponential
-        pulse template fit to the photon calibration data in the power
-        domain.
-        
-        Parameters:
-        -----------
-        
-        amp_1 : float
-            The amplitude of the delta function.
-            
-        amp_2 : float
-            The amplitude of the exponential pulse
-            
-        fall_2 : float
-            The fall time of the second pulse
-            
-        rise : float
-            The rise time of the exponential pulse
-            
-        dt : float
-            The difference between the trigger time and the
-            true rise time of the calibration pulses.
 
-        t_arr : array, optional
-            If not None, used to generate the modeled template
-            at these times.
-
-        start_time : float, optional
-            If not None, used instead of the internal start time
-            for the start time for the pulse.
-        """
-
+    def _get_fourpole_t_template(self, amp1, amp2, amp3, fall_1, fall_2, fall_3,
+                                 rise, t_arr=None, start_time=None, fs = 1.25e6):
         if t_arr is None:
             t_arr = self.t_arr
-
+        
         if start_time is None:
             start_time = self.pretrigger_window + self.dt
-        
-        pulse_1 = np.zeros(len(t_arr))
-        delta_start = int(fs*start_time)
-        pulse_1[delta_start] = amp_1
 
-        pulse_2 = make_template_twopole(t_arr, A = 1.0, 
-                                        tau_r=rise, tau_f=fall_2,
-                                        t0=start_time,
-                                        fs=fs) * amp_2
-        
-        if np.isnan(pulse_1).any() or np.isinf(pulse_1).all():
-            pulse_1 = np.zeros(len(pulse_1), dtype = np.float64)
-        if np.isnan(pulse_2).any() or np.isinf(pulse_2).all():
-            pulse_2 = np.zeros(len(pulse_2), dtype = np.float64)
-        
-        return pulse_1 + pulse_2
-    
-    def _get_deltapulse_f_template(self, amp_1, amp_2, fall_2, rise, t_arr=None, start_time=None, fs=1.25e6):
-        """
-        Calculates the frequency domain delta function plus single exponential
-        pulse template fit to the photon calibration data in the power
-        domain.
-        
-        Parameters:
-        -----------
-        
-        amp_1 : float
-            The amplitude of the delta function.
-            
-        amp_2 : float
-            The amplitude of the exponential pulse
-            
-        fall_2 : float
-            The fall time of the second pulse
-            
-        rise : float
-            The rise time of the exponential pulse
-            
-        dt : float
-            The difference between the trigger time and the
-            true rise time of the calibration pulses.
+        pulse = make_template_fourpole(t_arr, A = amp1, B = amp2,
+                                       C = amp3, tau_r=rise, 
+                                       tau_f1=fall_1, tau_f2 = fall_2,
+                                       tau_f3=fall_3, t0=start_time,
+                                       fs=fs, normalize = False)
 
-        t_arr : array, optional
-            If not None, used to generate the modeled template
-            at these times.
+        if np.isnan(pulse).any() or np.isinf(pulse).all():
+            pulse = np.zeros(len(pulse), dtype = np.float64)
+        
+        return pulse                
 
-        start_time : float, optional
-            If not None, used instead of the internal start time
-            for the start time for the pulse.
-        """
+    def _get_fourpole_f_template(self, amp_1, amp_2, amp_3, fall_1, fall_2, fall_3,
+                                 rise, t_arr=None, start_time=None, fs=1.25e6):
             
-        template_t = self._get_deltapulse_t_template(amp_1, amp_2, fall_2, rise, t_arr, start_time, fs=fs)
+        template_t = self._get_fourpole_t_template(amp_1, amp_2, amp_3, fall_1, fall_2, fall_3,
+                                                     rise, t_arr, start_time, fs=fs)
         
         return fft(template_t)/np.sqrt(len(template_t) * fs)
-        
-    def _get_deltatwopulse_t_template(self, amp_1, amp_2, amp_3, fall_2, fall_3, rise,
-                                      t_arr=None, start_time=None, fs=1.25e6):
-        """
-        Calculates the time domain delta function plus two exponential
-        pulse templates fit to the photon calibration data in the power
-        domain.
-        
-        Parameters:
-        -----------
-        
-        amp_1 : float
-            The amplitude of the delta function.
-            
-        amp_2 : float
-            The amplitude of the first exponential pulse
-            
-        amp_3 : float
-            The amplitude of the second exponential pulse
-            
-        fall_2 : float
-            The fall time of the first exponential pulse
-            
-        fall_3 : float
-            The fall time of the second exponential pulse
-            
-        rise : float
-            The rise time of the exponential pulse
-            
-        dt : float
-            The difference between the trigger time and the
-            true rise time of the calibration pulses.
-
-        t_arr : array, optional
-            If not None, used to generate the modeled template
-            at these times.
-
-        start_time : float, optional
-            If not None, used instead of the internal start time
-            for the start time for the pulse.
-        """
-
-        if t_arr is None:
-            t_arr = self.t_arr
-
-        if start_time is None:
-            start_time = self.pretrigger_window + self.dt
-        
-        pulse_1 = np.zeros(len(t_arr))
-        delta_start = int(fs*start_time)
-        pulse_1[delta_start] = amp_1
-
-        pulse_2 = make_template_twopole(t_arr, A = 1.0, 
-                                        tau_r=rise, tau_f=fall_2,
-                                        t0=start_time,
-                                        fs=fs) * amp_2
-
-        pulse_3 = make_template_twopole(t_arr, A = 1.0, 
-                                        tau_r=rise, tau_f=fall_3,
-                                        t0=start_time,
-                                        fs=fs) * amp_3
-        
-        if np.isnan(pulse_1).any() or np.isinf(pulse_1).all():
-            pulse_1 = np.zeros(len(pulse_1), dtype = np.float64)
-        if np.isnan(pulse_2).any() or np.isinf(pulse_2).all():
-            pulse_2 = np.zeros(len(pulse_2), dtype = np.float64)
-        if np.isnan(pulse_3).any() or np.isinf(pulse_3).all():
-            pulse_3 = np.zeros(len(pulse_3), dtype = np.float64)
-        
-        return pulse_1 + pulse_2 + pulse_3
-        
-    def _get_deltatwopulse_f_template(self, amp_1, amp_2, amp_3, fall_2, fall_3, rise,
-                                      t_arr=None, start_time=None, fs=1.25e6):
-        """
-        Calculates the frequency domain delta function plus two exponential
-        pulse templates fit to the photon calibration data in the power
-        domain.
-        
-        Parameters:
-        -----------
-        
-        amp_1 : float
-            The amplitude of the delta function.
-            
-        amp_2 : float
-            The amplitude of the first exponential pulse
-            
-        amp_3 : float
-            The amplitude of the second exponential pulse
-            
-        fall_2 : float
-            The fall time of the first exponential pulse
-            
-        fall_3 : float
-            The fall time of the second exponential pulse
-            
-        rise : float
-            The rise time of the exponential pulse
-            
-        dt : float
-            The difference between the trigger time and the
-            true rise time of the calibration pulses.
-
-        t_arr : array, optional
-            If not None, used to generate the modeled template
-            at these times.
-
-        start_time : float, optional
-            If not None, used instead of the internal start time
-            for the start time for the pulse.
-        """
-
-        if t_arr is None:
-            t_arr = self.t_arr
-
-        if start_time is None:
-            start_time = self.pretrigger_window + self.dt
-            
-        template_t = self._get_deltatwopulse_t_template(amp_1, amp_2, amp_3, fall_2, fall_3, rise,
-                                                        t_arr, start_time, fs=fs)
-        
-        return fft(template_t)/np.sqrt(len(template_t) * fs)
-        
-    def _get_threepulse_t_template(self, amp_1, amp_2, amp_3,
-                                   fall_1, fall_2, fall_3, rise,
-                                   t_arr=None, start_time=None, fs=1.25e6):
-        """
-        Calculates the time domain three exponential
-        pulse template fit to the photon calibration data in the power
-        domain.
-        
-        Parameters:
-        -----------
-        
-        amp_1 : float
-            The amplitude of the first pulse.
-            
-        amp_2 : float
-            The amplitude of the second pulse.
-            
-        amp_3 : float
-            The amplitude of the third pulse.
-            
-        fall_1 : float
-            The fall time of the first pulse
-            
-        fall_2 : float
-            The fall time of the second pulse
-            
-        fall_3 : float
-            The fall time of the third pulse
-            
-        rise : float
-            The rise time of all the pulses
-
-        t_arr : array, optional
-            If not None, used to generate the modeled template
-            at these times.
-
-        start_time : float, optional
-            If not None, used instead of the internal start time
-            for the start time for the pulse.
-        """
-        
-        if t_arr is None:
-            t_arr = self.t_arr
-
-        if start_time is None:
-            start_time = self.pretrigger_window + self.dt
 
 
-        pulse_1 = make_template_twopole(t_arr, A = 1.0, 
-                                        tau_r=rise, tau_f=fall_1,
-                                        t0=start_time,
-                                        fs=fs) * amp_1
-
-        pulse_2 = make_template_twopole(t_arr, A = 1.0, 
-                                        tau_r=rise, tau_f=fall_2,
-                                        t0=start_time,
-                                        fs=fs) * amp_2
-                                
-        pulse_3 = make_template_twopole(t_arr, A = 1.0, 
-                                        tau_r=rise, tau_f=fall_3,
-                                        t0=start_time,
-                                        fs=fs) * amp_3
-        
-        return pulse_1 + pulse_2 + pulse_3
-    
-    def _get_threepulse_f_template(self, amp_1, amp_2, amp_3,
-                                   fall_1, fall_2, fall_3, rise,
-                                   t_arr=None, start_time=None, fs=1.25e6):
-        """
-        Calculates the frequency domain three exponential
-        pulse template fit to the photon calibration data in the power
-        domain.
-        
-        Parameters:
-        -----------
-        
-        amp_1 : float
-            The amplitude of the first pulse.
-            
-        amp_2 : float
-            The amplitude of the second pulse.
-            
-        amp_3 : float
-            The amplitude of the third pulse.
-            
-        fall_1 : float
-            The fall time of the first pulse
-            
-        fall_2 : float
-            The fall time of the second pulse
-            
-        fall_3 : float
-            The fall time of the third pulse
-            
-        rise : float
-            The rise time of all the pulses
-
-        t_arr : array, optional
-            If not None, used to generate the modeled template
-            at these times.
-
-        start_time : float, optional
-            If not None, used instead of the internal start time
-            for the start time for the pulse.
-        """
-            
-        template_t = self._get_threepulse_t_template(amp_1, amp_2, amp_3, fall_1, fall_2, fall_3, rise,
-                                                     t_arr, start_time, fs=fs)
-        
-        return fft(template_t)/np.sqrt(len(template_t) * fs)
-    
     def _get_modeled_template_f(self, params, t_arr=None, start_time=None, fs=None):
         """
         Calculates the frequency domain template for a generic
@@ -2023,33 +1580,29 @@ class PhotonCalibration:
         
         if fs is None:
             fs = self.fs
-        
-        if self.template_model == 'onepulse':
+
+        if self.template_model == 'twopole':
             amp_1, fall_1, rise = params
-            model_template_f = self._get_onepulse_f_template(amp_1, fall_1, rise,
-                                                             t_arr, start_time, fs=fs)
-        elif self.template_model == 'twopulse':
+            model_template_f = self._get_twopole_f_template(amp_1, fall_1, rise,
+                                                            t_arr, start_time, fs=fs)
+            
+        elif self.template_model == 'threepole':
             amp_1, amp_2, fall_1, fall_2, rise = params
-            model_template_f = self._get_twopulse_f_template(amp_1, amp_2, fall_1, fall_2, rise,
-                                                             t_arr, start_time, fs=fs)
-        elif self.template_model == 'threepulse':
-            amp_1, amp_2, amp3, fall_1, fall_2, fall_3, rise = params
-            model_template_f = self._get_threepulse_f_template(amp_1, amp_2, amp3, fall_1, fall_2, fall_3, rise, 
-                                                               t_arr, start_time, fs=fs)
-        elif self.template_model == 'deltapulse':  
-            amp_1, amp_2, fall_2, rise = params
-            model_template_f = self._get_deltapulse_f_template(amp_1, amp_2, fall_2, rise,
-                                                               t_arr, start_time, fs=fs)
-        elif self.template_model == 'deltatwopulse':  
-            amp_1, amp_2, amp_3, fall_2, fall_3, rise = params
-            model_template_f = self._get_deltatwopulse_f_template(amp_1, amp_2, amp_3, fall_2, fall_3, rise,
-                                                               t_arr, start_time, fs=fs)
+            model_template_f = self._get_threepole_f_template(amp_1, amp_2, fall_1, fall_2,
+                                                              rise, t_arr, start_time, fs=fs)
+        
+        elif self.template_model == 'threepole':
+            amp_1, amp_2, amp_3, fall_1, fall_2, fall_3, rise = params
+            model_template_f = self._get_threepole_f_template(amp_1, amp_2, amp_3, fall_1, 
+                                                              fall_2, fall_3, rise, t_arr,
+                                                              start_time, fs=fs)
+               
         else:
-            print("Unknown template model!")
+            raise ValueError("Unknown template model!")
                 
         return model_template_f
     
-    def _get_modeled_template_t(self, params, t_arr=None, start_time=None):
+    def _get_modeled_template_t(self, params, t_arr=None, start_time=None, fs = None):
         """
         Calculates the time domain template for a generic
         template model, with self.model setting the template
@@ -2069,29 +1622,28 @@ class PhotonCalibration:
             If not None, used instead of the internal start time
             for the start time for the pulse.
         """
-        
-        if self.template_model == 'onepulse':
+      
+        if fs is None:
+            fs = self.fs
+
+        if self.template_model == 'twopole':
             amp_1, fall_1, rise = params
-            model_template_t = self._get_onepulse_t_template(amp_1, fall_1, rise, 
-                                                             t_arr, start_time)
-        elif self.template_model == 'twopulse':
+            model_template_t = self._get_twopole_t_template(amp_1, fall_1, rise,
+                                                            t_arr, start_time, fs=fs)
+            
+        elif self.template_model == 'threepole':
             amp_1, amp_2, fall_1, fall_2, rise = params
-            model_template_t = self._get_twopulse_t_template(amp_1, amp_2, fall_1, fall_2, rise, 
-                                                             t_arr, start_time)
-        elif self.template_model == 'threepulse':
-            amp_1, amp_2, amp3, fall_1, fall_2, fall_3, rise = params
-            model_template_t = self._get_threepulse_t_template(amp_1, amp_2, amp3, fall_1, fall_2, fall_3, rise, 
-                                                               t_arr, start_time)
-        elif self.template_model == 'deltapulse':  
-            amp_1, amp_2, fall_2, rise = params
-            model_template_t = self._get_deltapulse_t_template(amp_1, amp_2, fall_2, rise,
-                                                               t_arr, start_time)
-        elif self.template_model == 'deltatwopulse':  
-            amp_1, amp_2, amp_3, fall_2, fall_3, rise = params
-            model_template_t = self._get_deltatwopulse_t_template(amp_1, amp_2, amp_3, fall_2, fall_3, rise,
-                                                               t_arr, start_time)
+            model_template_t = self._get_threepole_t_template(amp_1, amp_2, fall_1, fall_2,
+                                                              rise, t_arr, start_time, fs=fs)
+        
+        elif self.template_model == 'threepole':
+            amp_1, amp_2, amp_3, fall_1, fall_2, fall_3, rise = params
+            model_template_t = self._get_threepole_t_template(amp_1, amp_2, amp_3, fall_1, 
+                                                              fall_2, fall_3, rise, t_arr,
+                                                              start_time, fs=fs)
+               
         else:
-            print("Unknown template model!")
+            raise ValueError("Unknown template model!")
                 
         return model_template_t
     
@@ -2107,7 +1659,7 @@ class PhotonCalibration:
             The number of the photon peak to print.
         """
         
-        if self.template_model == 'onepulse':
+        if self.template_model == 'twopole':
             popt = self.fit_vars_dict[photon_peak_number]
             pcov = self.fit_cov_dict[photon_peak_number]
             pstds = np.sqrt(np.diag(pcov))
@@ -2128,7 +1680,7 @@ class PhotonCalibration:
             print("Fall Time 1: " + str(fall_1*1e6) + " +/- " + str(fall_1_err*1e6) + " us")
             print("Rise Time: " + str(rise*1e6) + " +/- " + str(rise_err*1e6) + " us")
             
-        elif self.template_model == 'twopulse':
+        elif self.template_model == 'threepole':
             popt = self.fit_vars_dict[photon_peak_number]
             pcov = self.fit_cov_dict[photon_peak_number]
             pstds = np.sqrt(np.diag(pcov))
@@ -2151,7 +1703,7 @@ class PhotonCalibration:
             print("Fall Time 2: " + str(fall_2*1e6) + " +/- " + str(fall_2_err*1e6) + " us")
             print("Rise Time: " + str(rise*1e6) + " +/- " + str(rise_err*1e6) + " us")
         
-        elif self.template_model == 'threepulse':
+        elif self.template_model == 'fourpole':
             popt = self.fit_vars_dict[photon_peak_number]
             pcov = self.fit_cov_dict[photon_peak_number]
             pstds = np.sqrt(np.diag(pcov))
@@ -2175,56 +1727,9 @@ class PhotonCalibration:
             print("Fall Time 2: " + str(fall_2*1e6) + " +/- " + str(fall_2_err*1e6) + " us")
             print("Fall Time 3: " + str(fall_3*1e6) + " +/- " + str(fall_3_err*1e6) + " us")
             print("Rise Time: " + str(rise*1e6) + " +/- " + str(rise_err*1e6) + " us")
-            
-        elif self.template_model == 'deltapulse':
-            popt = self.fit_vars_dict[photon_peak_number]
-            pcov = self.fit_cov_dict[photon_peak_number]
-            pstds = np.sqrt(np.diag(pcov))
-            
-            print("popt: ")
-            print(popt)
-            print(" ")
-
-            print("cov:")
-            print(pcov)
-            print(" ")
-            
-            amp_1, amp_2, fall_2, rise = popt
-            amp_1_err, amp_2_err, fall_2_err, rise_err = pstds
-            
-        
-            print("Amplitude Delta Function Pulse: " + str(amp_1) + " +/- " + str(amp_1_err))
-            print("Amplitude Exponential Pulse: " + str(amp_2) + " +/- " + str(amp_2_err))
-            print("Fall Time Exponential Pulse: " + str(fall_2*1e6) + " +/- " + str(fall_2_err*1e6) + " us")
-            print("Rise Time Exponential Pulse: " + str(rise*1e6) + " +/- " + str(rise_err*1e6) + " us")
-            print("")
-            
-        elif self.template_model == 'deltatwopulse':
-            popt = self.fit_vars_dict[photon_peak_number]
-            pcov = self.fit_cov_dict[photon_peak_number]
-            pstds = np.sqrt(np.diag(pcov))
-            
-            print("popt: ")
-            print(popt)
-            print(" ")
-
-            print("cov:")
-            print(pcov)
-            print(" ")
-            
-            amp_1, amp_2, amp_3, fall_2, fall_3, rise = popt
-            amp_1_err, amp_2_err, amp_3_err, fall_2_err, fall_3_err, rise_err = pstds
-            
-        
-            print("Amplitude Delta Function Pulse: " + str(amp_1) + " +/- " + str(amp_1_err))
-            print("Amplitude First Exponential Pulse: " + str(amp_2) + " +/- " + str(amp_2_err))
-            print("Amplitude Second Exponential Pulse: " + str(amp_3) + " +/- " + str(amp_3_err))
-            print("Fall Time First Exponential Pulse: " + str(fall_2*1e6) + " +/- " + str(fall_2_err*1e6) + " us")
-            print("Fall Time Second Exponential Pulse: " + str(fall_3*1e6) + " +/- " + str(fall_3_err*1e6) + " us")
-            print("Rise Time Exponential Pulse: " + str(rise*1e6) + " +/- " + str(rise_err*1e6) + " us")
-            print("")
+          
         else:
-            print("Unknown Model!")
+            raise ValueError("Unknown Model!")
             
     def _get_temp_i_t_from_temp_p_f(self, temp_p_f, dpdi, fs=1.25e6):
         """
@@ -2330,7 +1835,12 @@ class PhotonCalibration:
             verbose_ = 0
             
         if guess is None:
-            guess = [1e-15, 1e-15, 10e-6, 100e-6, 1e-6, 1e-6]
+            if self.template_model == 'twopole':
+                guess = 0
+            elif self.template_model == 'threepole':
+                guess = 0
+            elif self.template_model == 'fourpole':
+                guess = 0
             
         if lgc_plot:
             plt.plot(self.t_arr*1e3, mean_p_t, label = "Mean Trace Peak " + str(photon_peak_number),
@@ -2343,6 +1853,7 @@ class PhotonCalibration:
                 
             model_template_f = self._get_modeled_template_f(guess)
             model_template_t = self._get_modeled_template_t(guess)
+
             lp_model_template_t = lowpassfilter(model_template_t, cut_off_freq=filter_freq,
                                                 order=2, fs=self.fs)
             plt.plot(self.t_arr*1e3, lp_model_template_t, color = 'C1', label = "Fit Template")
