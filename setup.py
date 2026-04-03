@@ -51,10 +51,13 @@ setup(
     },
     install_requires=[
         'numpy',
+        'pandas',
         'matplotlib',
         'astropy',
-        'pytesdaq>=0.3.3',
+        'pytesio>=0.4.7',
         'vaex',
+        'GitPython',
         'tabulate',
+        'qetpy>=1.8.5'
     ],
 )

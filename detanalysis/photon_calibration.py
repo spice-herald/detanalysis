@@ -5,9 +5,7 @@ from scipy.optimize import least_squares
 import matplotlib.pyplot as plt
 from tabulate import tabulate
 import copy
-import pytesdaq.io as h5io
-
-
+import pytesio as h5io
 from qetpy.core.didv._uncertainties_didv import get_dPdI_with_uncertainties
 from qetpy.core import calc_psd
 from qetpy.utils import make_template_twopole, make_template_threepole, make_template_fourpole, lowpassfilter
