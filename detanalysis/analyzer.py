@@ -238,16 +238,21 @@ class Analyzer:
         else:
             yield self._resolve_cut_reference(cut, df=df)
 
+ 
     def _full_mask_from_selection_on_df(self, selection, df):
         """
-        Convert a selection on `df` into a full-length mask on `_df_full`
+        Convert a selection/expression on `df` into a full-length mask on `_df_full`
         using the permanent `__event_index__`.
         """
-        selected_event_ids = np.asarray(
-            df.evaluate("__event_index__", selection=selection)
-        )
+        if selection is None:
+            selected_df = df
+        else:
+            selected_df = df[selection]
+
+        selected_event_ids = np.asarray(selected_df.evaluate("__event_index__"))
         full_event_ids = np.asarray(self._df_full.evaluate("__event_index__"))
         return np.isin(full_event_ids, selected_event_ids)
+
 
     def _materialize_expr_to_full_mask(self, cut):
         """
@@ -279,10 +284,13 @@ class Analyzer:
                 overwrite=True,
                 df=self._df_full,
             )
-            self._df = self._df_full.filter(self._df_full[self._global_filter_column])
-            self._is_df_filtered = True
 
+            # Use direct boolean indexing, not .filter(...)
+            self._df = self._df_full[self._df_full[self._global_filter_column]]
+            self._is_df_filtered = True
+            
         self._fill_df_info()
+
 
     # ------------------------------------------------------------------
     # Core data access
@@ -293,9 +301,8 @@ class Analyzer:
         Get values of a feature or expression as a NumPy array from current view.
         """
         with self._selection_from_cut(cut, df=self._df) as selection:
-            values = np.asarray(
-                self._df.evaluate(feature_exp, selection=selection, **kwargs)
-            )
+            df_used = self._df if selection is None else self._df[selection]
+            values = np.asarray(df_used.evaluate(feature_exp, **kwargs))
         return values
 
     # ------------------------------------------------------------------
@@ -308,7 +315,6 @@ class Analyzer:
         name,
         metadata=None,
         overwrite=False,
-        mode="replace",
     ):
         """
         Register a cut as a boolean column on `_df_full`.
@@ -319,12 +325,6 @@ class Analyzer:
         full-length boolean mask. `mode` is accepted for API compatibility,
         but only `replace` is meaningful here.
         """
-        if mode != "replace":
-            print(
-                "WARNING: In column-only design, register_cut stores a frozen "
-                "boolean column. mode is ignored. Combine cuts explicitly first."
-            )
-
         if not overwrite and name in self._cuts:
             print(
                 f'Cut "{name}" already registered! '
@@ -438,12 +438,8 @@ class Analyzer:
     # ------------------------------------------------------------------
 
     def apply_global_filter(self, cut, mode="replace"):
-        """
-        Apply a global filter by updating the internal full-length mask
-        and rebuilding `_df` as a filtered view of `_df_full`.
-        """
         new_mask = self._materialize_expr_to_full_mask(cut)
-
+        
         if mode == "replace" or self._current_filter_mask is None:
             self._current_filter_mask = new_mask
         elif mode == "and":
@@ -457,11 +453,20 @@ class Analyzer:
         else:
             raise ValueError(f'Unknown mode "{mode}"')
 
+        expected = int(np.count_nonzero(self._current_filter_mask))
+
         self._refresh_df_view()
+
+        actual = len(self._df)
+        if actual != expected:
+            raise RuntimeError(
+                f"Global filter inconsistency: expected {expected} events, got {actual}."
+            )
 
         eff_percent = self._nevents / self._nevents_nofilter * 100
         print("Filter applied!")
         print(f"Number of events after filter: {self._nevents} ({eff_percent:.1f}%)")
+
 
     def drop_global_filter(self):
         """
@@ -969,41 +974,42 @@ class Analyzer:
         return fig, ax
 
     def get_event_list(
-        self,
-        cut=None,
-        nb_random_samples=None,
-        nb_events_check=True,
-        nb_events_limit=1000,
+            self,
+            cut=None,
+            nb_random_samples=None,
+            nb_events_limit=5000,
     ):
         with self._selection_from_cut(cut, df=self._df) as selection:
-            df = self._df.filter(selection) if selection is not None else self._df.copy()
+            df_used = self._df if selection is None else self._df[selection]
 
-        if df.shape[0] == 0:
+        if len(df_used) == 0:
             print("WARNING: No events found!")
             return None
 
-        if nb_random_samples is not None and nb_random_samples < df.shape[0]:
-            df = df.sample(n=nb_random_samples)
+        if nb_random_samples is not None and nb_random_samples < len(df_used):
+            df_used = df_used.sample(n=nb_random_samples)
 
-        nb_events = df.shape[0]
+        nb_events = len(df_used)
 
-        if nb_events_check and nb_events > nb_events_limit:
+        if nb_events > nb_events_limit:
             raise ValueError(
                 f"ERROR: Number of events limited to {nb_events_limit}. "
-                f"Found {nb_events} traces! Use nb_events_check=False to disable error."
+                f"Found {nb_events} traces! Change nb_events_limit if needed!"
             )
 
         if "eventnumber" in self._feature_names:
-            series_nums = df.seriesnumber.values
-            event_nums = df.eventnumber.values
+            series_nums = df_used.seriesnumber.values
+            event_nums = df_used.eventnumber.values
             group_names = None
             trigger_indices = None
         else:
-            series_nums = df.series_number.values
-            event_nums = df.event_number.values
-            group_names = df.group_name.values if "group_name" in self._feature_names else None
+            series_nums = df_used.series_number.values
+            event_nums = df_used.event_number.values
+            group_names = (
+                df_used.group_name.values if "group_name" in self._feature_names else None
+            )
             trigger_indices = (
-                df.trigger_index.values if "trigger_index" in self._feature_names else None
+                df_used.trigger_index.values if "trigger_index" in self._feature_names else None
             )
 
         event_list = []
