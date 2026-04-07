@@ -5,7 +5,6 @@ import importlib
 from glob import glob
 from pprint import pprint
 from inspect import getmembers, isfunction
-from contextlib import contextmanager
 
 import git
 import numpy as np
@@ -192,19 +191,6 @@ class Analyzer:
 
         df[array_name] = array
 
-    @contextmanager
-    def _temporary_cut_column(self, cut_array, prefix="__tmp_cut__", df=None):
-        if df is None:
-            df = self._df
-
-        arr = self._normalize_numpy_cut(cut_array, expected_length=len(df))
-        tmp_name = f"{prefix}{uuid.uuid4().hex}"
-        df[tmp_name] = arr
-        try:
-            yield tmp_name
-        finally:
-            self._drop_column_if_exists(tmp_name, df=df)
-
     def _resolve_cut_reference(self, cut, df=None):
         """
         Resolve:
@@ -222,35 +208,44 @@ class Analyzer:
                 return df[cut]
         return cut
 
-    @contextmanager
-    def _selection_from_cut(self, cut, df=None):
-        """
-        Convert cut input to something Vaex can use for boolean indexing on df.
-        """
-        if df is None:
-            df = self._df
-
-        if cut is None:
-            yield None
-        elif self._is_numpy_cut(cut):
-            with self._temporary_cut_column(cut, df=df) as tmp_name:
-                yield df[tmp_name]
-        else:
-            yield self._resolve_cut_reference(cut, df=df)
-
     def _subset_df(self, df, cut=None):
         """
-        Return df or a boolean-indexed subset of df.
+        Return df or a subset of df using supported cut inputs.
+
+        Supported cut inputs:
+          - None
+          - NumPy boolean mask with len(df)
+          - registered cut name / boolean column name
+          - string Vaex expression
+          - Vaex boolean expression
         """
-        with self._selection_from_cut(cut, df=df) as selection:
-            return df if selection is None else df[selection]
+        if cut is None:
+            return df
+
+        if self._is_numpy_cut(cut):
+            arr = self._normalize_numpy_cut(cut, expected_length=len(df))
+            tmp_name = f"__tmp_cut__{uuid.uuid4().hex}"
+            df_tmp = df.copy()
+            df_tmp[tmp_name] = arr
+            return df_tmp[df_tmp[tmp_name]]
+
+        if isinstance(cut, str):
+            # registered cut name or existing boolean column
+            if cut in self._cuts or self._has_column(cut, df=self._df_full):
+                return df[df[cut]]
+
+            # otherwise treat as expression string
+            return df.filter(cut)
+
+        # Vaex boolean expression
+        return df[cut]
 
     def _full_mask_from_selection_on_df(self, selection, df):
         """
-        Convert a selection/expression on `df` into a full-length mask on `_df_full`
+        Convert a cut/expression on `df` into a full-length mask on `_df_full`
         using the permanent `__event_index__`.
         """
-        selected_df = df if selection is None else df[selection]
+        selected_df = self._subset_df(df, selection)
         selected_event_ids = np.asarray(selected_df.evaluate("__event_index__"))
         full_event_ids = np.asarray(self._df_full.evaluate("__event_index__"))
         return np.isin(full_event_ids, selected_event_ids)
@@ -270,8 +265,7 @@ class Analyzer:
         if self._is_numpy_cut(cut):
             return self._normalize_numpy_cut(cut, expected_length=len(self._df_full))
 
-        with self._selection_from_cut(cut, df=self._df_full) as selection:
-            return self._full_mask_from_selection_on_df(selection, self._df_full)
+        return self._full_mask_from_selection_on_df(cut, self._df_full)
 
     def _materialize_cut_to_column(self, cut, column_name, overwrite=True):
         mask = self._materialize_expr_to_full_mask(cut)
