@@ -56,7 +56,7 @@ class Analyzer:
         self._df = None
         self._is_df_filtered = False
         self._current_filter_mask = None
-        self._global_filter_column = "__global_filter__"
+        self._filter_version = 0
 
         self._nevents = None
         self._nevents_nofilter = None
@@ -225,7 +225,7 @@ class Analyzer:
     @contextmanager
     def _selection_from_cut(self, cut, df=None):
         """
-        Convert cut input to something Vaex can use as selection/filter on df.
+        Convert cut input to something Vaex can use for boolean indexing on df.
         """
         if df is None:
             df = self._df
@@ -238,26 +238,34 @@ class Analyzer:
         else:
             yield self._resolve_cut_reference(cut, df=df)
 
- 
+    def _subset_df(self, df, cut=None):
+        """
+        Return df or a boolean-indexed subset of df.
+        """
+        with self._selection_from_cut(cut, df=df) as selection:
+            return df if selection is None else df[selection]
+
     def _full_mask_from_selection_on_df(self, selection, df):
         """
         Convert a selection/expression on `df` into a full-length mask on `_df_full`
         using the permanent `__event_index__`.
         """
-        if selection is None:
-            selected_df = df
-        else:
-            selected_df = df[selection]
-
+        selected_df = df if selection is None else df[selection]
         selected_event_ids = np.asarray(selected_df.evaluate("__event_index__"))
         full_event_ids = np.asarray(self._df_full.evaluate("__event_index__"))
         return np.isin(full_event_ids, selected_event_ids)
 
+    def _full_mask_from_widget_default_selection(self, df):
+        """
+        Convert Vaex widget 'default' selection on df into a full-length mask on _df_full.
+        """
+        selected_event_ids = np.asarray(df.evaluate("__event_index__", selection="default"))
+        full_event_ids = np.asarray(self._df_full.evaluate("__event_index__"))
+        return np.isin(full_event_ids, selected_event_ids)
 
     def _materialize_expr_to_full_mask(self, cut):
         """
-        Convert supported cut input into a full-length boolean mask
-        in `_df_full` row space.
+        Convert supported cut input into a full-length boolean mask in `_df_full` row space.
         """
         if self._is_numpy_cut(cut):
             return self._normalize_numpy_cut(cut, expected_length=len(self._df_full))
@@ -272,25 +280,23 @@ class Analyzer:
     def _refresh_df_view(self):
         """
         Rebuild `_df` from `_df_full` and the internal global filter mask.
+
+        `_df_full` stores only persistent columns/cuts/features.
+        `_df` is rebuilt from a fresh copy when a global filter is active.
         """
         if self._current_filter_mask is None:
-            self._drop_column_if_exists(self._global_filter_column, df=self._df_full)
             self._df = self._df_full
             self._is_df_filtered = False
         else:
-            self._add_array_column(
-                self._current_filter_mask,
-                self._global_filter_column,
-                overwrite=True,
-                df=self._df_full,
-            )
+            self._filter_version += 1
+            filter_col = f"__global_filter__{self._filter_version}"
 
-            # Use direct boolean indexing, not .filter(...)
-            self._df = self._df_full[self._df_full[self._global_filter_column]]
+            df_view = self._df_full.copy()
+            df_view[filter_col] = self._current_filter_mask
+            self._df = df_view[df_view[filter_col]]
             self._is_df_filtered = True
-            
-        self._fill_df_info()
 
+        self._fill_df_info()
 
     # ------------------------------------------------------------------
     # Core data access
@@ -300,9 +306,8 @@ class Analyzer:
         """
         Get values of a feature or expression as a NumPy array from current view.
         """
-        with self._selection_from_cut(cut, df=self._df) as selection:
-            df_used = self._df if selection is None else self._df[selection]
-            values = np.asarray(df_used.evaluate(feature_exp, **kwargs))
+        df_used = self._subset_df(self._df, cut=cut)
+        values = np.asarray(df_used.evaluate(feature_exp, **kwargs))
         return values
 
     # ------------------------------------------------------------------
@@ -318,12 +323,6 @@ class Analyzer:
     ):
         """
         Register a cut as a boolean column on `_df_full`.
-
-        Notes
-        -----
-        This is a column-only design. The cut is materialized as a frozen
-        full-length boolean mask. `mode` is accepted for API compatibility,
-        but only `replace` is meaningful here.
         """
         if not overwrite and name in self._cuts:
             print(
@@ -346,17 +345,10 @@ class Analyzer:
         name,
         metadata=None,
         overwrite=False,
-        mode="replace",
     ):
         """
         Register a rectangular cut as a boolean column on `_df_full`.
         """
-        if mode != "replace":
-            print(
-                "WARNING: In column-only design, register_cut_box stores a frozen "
-                "boolean column. mode is ignored. Combine cuts explicitly first."
-            )
-
         if not overwrite and name in self._cuts:
             print(
                 f'Cut "{name}" already registered! '
@@ -392,7 +384,7 @@ class Analyzer:
         if metadata is None:
             metadata = {}
 
-        mask = self._full_mask_from_selection_on_df("default", self._df)
+        mask = self._full_mask_from_widget_default_selection(self._df)
         self._add_array_column(mask, name, overwrite=True, df=self._df_full)
         self._cuts[name] = metadata
         self._refresh_df_view()
@@ -439,9 +431,9 @@ class Analyzer:
 
     def apply_global_filter(self, cut, mode="replace"):
         new_mask = self._materialize_expr_to_full_mask(cut)
-        
+
         if mode == "replace" or self._current_filter_mask is None:
-            self._current_filter_mask = new_mask
+            self._current_filter_mask = new_mask.copy()
         elif mode == "and":
             self._current_filter_mask &= new_mask
         elif mode == "or":
@@ -466,7 +458,6 @@ class Analyzer:
         eff_percent = self._nevents / self._nevents_nofilter * 100
         print("Filter applied!")
         print(f"Number of events after filter: {self._nevents} ({eff_percent:.1f}%)")
-
 
     def drop_global_filter(self):
         """
@@ -587,6 +578,7 @@ class Analyzer:
         )
 
         self._current_filter_mask = None
+        self._filter_version = 0
         self._df = self._df_full
         self._is_df_filtered = False
 
@@ -656,19 +648,17 @@ class Analyzer:
         for icut, cut in enumerate(cuts):
             label = labels[icut] if labels is not None else None
             kwargs["color"] = colors[icut]
-
-            with self._selection_from_cut(cut, df=self._df) as selection:
-                self._df.viz.histogram(
-                    feature_x,
-                    selection=selection,
-                    shape=shape,
-                    limits=limits,
-                    n=normalize,
-                    xlabel=xlabel,
-                    ylabel=ylabel,
-                    label=label,
-                    **kwargs,
-                )
+            df_used = self._subset_df(self._df, cut=cut)
+            df_used.viz.histogram(
+                feature_x,
+                shape=shape,
+                limits=limits,
+                n=normalize,
+                xlabel=xlabel,
+                ylabel=ylabel,
+                label=label,
+                **kwargs,
+            )
 
         ax.tick_params(which="both", direction="in", right=True, top=True)
         ax.grid(linestyle="dashed")
@@ -714,21 +704,20 @@ class Analyzer:
                 )
             limits = [xlimits, ylimits]
 
-        with self._selection_from_cut(cut, df=self._df) as selection:
-            self._df.viz.heatmap(
-                feature_x,
-                feature_y,
-                colormap=colormap,
-                shape=shape,
-                f=f,
-                limits=limits,
-                figsize=figsize,
-                xlabel=xlabel,
-                ylabel=ylabel,
-                selection=selection,
-                what=what,
-                **kwargs,
-            )
+        df_used = self._subset_df(self._df, cut=cut)
+        df_used.viz.heatmap(
+            feature_x,
+            feature_y,
+            colormap=colormap,
+            shape=shape,
+            f=f,
+            limits=limits,
+            figsize=figsize,
+            xlabel=xlabel,
+            ylabel=ylabel,
+            what=what,
+            **kwargs,
+        )
 
         ax.tick_params(which="both", direction="in", right=True, top=True)
         ax.grid(linestyle="dashed")
@@ -790,28 +779,26 @@ class Analyzer:
         if ax is None:
             fig, ax = plt.subplots(figsize=figsize)
 
-        df = self._df.copy()
-        if nb_random_samples is not None:
-            df = df.sample(n=nb_random_samples)
+        base_df = self._df
+        if nb_random_samples is not None and nb_random_samples < len(base_df):
+            base_df = base_df.sample(n=nb_random_samples)
 
         for icut, cut in enumerate(cuts):
             label = labels[icut] if labels is not None else None
             color = colors[icut]
-
-            with self._selection_from_cut(cut, df=self._df) as selection:
-                df.viz.scatter(
-                    feature_x,
-                    feature_y,
-                    selection=selection,
-                    xlabel=xlabel,
-                    ylabel=ylabel,
-                    label=label,
-                    color=color,
-                    s=ms,
-                    alpha=alpha,
-                    length_check=length_check,
-                    **kwargs,
-                )
+            df_used = self._subset_df(base_df, cut=cut)
+            df_used.viz.scatter(
+                feature_x,
+                feature_y,
+                xlabel=xlabel,
+                ylabel=ylabel,
+                label=label,
+                color=color,
+                s=ms,
+                alpha=alpha,
+                length_check=length_check,
+                **kwargs,
+            )
 
         if xlimits is not None:
             ax.set_xlim(xlimits)
@@ -868,13 +855,13 @@ class Analyzer:
         figsize=None,
         colors=None,
         colormap=None,
-        nb_events_check=True,
         single_plot=False,
         baselinesub=True,
         baselineinds=(5, 100),
         lpcutoff=None,
+        nb_events_limit=100,
     ):
-        max_traces = 100 if single_plot else 20
+        max_traces = nb_events_limit if single_plot else min(nb_events_limit, 20)
 
         if isinstance(channels, str):
             channels = [channels]
@@ -888,7 +875,6 @@ class Analyzer:
             raw_path=raw_path,
             cut=cut,
             nb_random_samples=nb_random_samples,
-            nb_events_check=nb_events_check,
             nb_events_limit=max_traces,
             baselinesub=baselinesub,
             baselineinds=baselineinds,
@@ -974,13 +960,12 @@ class Analyzer:
         return fig, ax
 
     def get_event_list(
-            self,
-            cut=None,
-            nb_random_samples=None,
-            nb_events_limit=5000,
+        self,
+        cut=None,
+        nb_random_samples=None,
+        nb_events_limit=5000,
     ):
-        with self._selection_from_cut(cut, df=self._df) as selection:
-            df_used = self._df if selection is None else self._df[selection]
+        df_used = self._subset_df(self._df, cut=cut)
 
         if len(df_used) == 0:
             print("WARNING: No events found!")
@@ -1038,7 +1023,6 @@ class Analyzer:
         pretrigger_length_samples=None,
         cut=None,
         nb_random_samples=None,
-        nb_events_check=True,
         nb_events_limit=1000,
         memory_limit=2,
         baselinesub=False,
@@ -1047,7 +1031,6 @@ class Analyzer:
         event_list = self.get_event_list(
             cut=cut,
             nb_random_samples=nb_random_samples,
-            nb_events_check=nb_events_check,
             nb_events_limit=nb_events_limit,
         )
 
@@ -1182,7 +1165,6 @@ class Analyzer:
                         name=func_name,
                         metadata=func_metadata,
                         overwrite=True,
-                        mode="replace",
                     )
                 else:
                     self.add_feature(
