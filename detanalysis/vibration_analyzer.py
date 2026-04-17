@@ -6,6 +6,9 @@ Inherits detanalysis.Analyzer with vibration-specific PSD and transfer function 
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+from tqdm import tqdm
+import detprocess
+import pytesdaq.io as h5io
 from detanalysis import Analyzer
 
 
@@ -16,14 +19,27 @@ class Vibration_Analyzer(Analyzer):
 
     Inherits all Analyzer capabilities (vaex DataFrame access, cut management,
     histogram/scatter plotting, etc.) and adds:
-      - get_psd()              : compute PSDs and ASD uncertainties per channel
-      - get_transfer_function(): compute ASD transfer functions for multiple channel pairs
-      - plot_psd()             : plot ASD for one or more channels with uncertainty bands
-      - plot_transfer_function(): plot transfer functions for one or more channel pairs
+      - get_psd()                       : compute PSDs and uncertainties per channel
+      - get_transfer_function()         : compute transfer functions via up to three
+                                          estimators (mean_ratio, cross_correlation,
+                                          phase_locked) for multiple channel pairs
+      - plot_psd()                      : plot PSD for one or more channels
+      - plot_transfer_function()        : plot transfer function magnitude
+      - plot_transfer_function_phase()  : plot transfer function phase (complex
+                                          methods only)
 
-    PSDs computed by get_psd() are cached internally so that a subsequent call to
-    get_transfer_function() or plot_psd() can reuse them without re-reading the data.
+    Transfer function estimators operate on per-trace complex amplitudes
+    z = A + iB (from sinusoidal fits at each drive frequency):
+      - mean_ratio:        |mean(z_out)| / |mean(z_in)|   (real, amplitude only)
+      - cross_correlation: mean(z_out * conj(z_in)) / mean(|z_in|^2)  (complex)
+      - phase_locked:      mean(z_out) / mean(z_in)       (complex, unbiased)
+
+    PSDs computed by get_psd() are cached internally for reuse by plot_psd().
+    Transfer functions are cached per-method for reuse by plotting methods.
     """
+
+    # Valid transfer function estimation methods.
+    VALID_TF_METHODS = ('mean_ratio', 'cross_correlation', 'phase_locked')
 
     # Intrinsic accelerometer noise floor (from accelerometer spec sheet).
     # Piecewise-constant: value at index k applies from FREQS_HZ[k] to FREQS_HZ[k+1].
@@ -53,6 +69,299 @@ class Vibration_Analyzer(Analyzer):
         self._freqs              = None   # np.ndarray, shape (n_freqs,)
         self._channels           = None   # list of str — channel names, index matches _psd rows
         self._transfer_functions = None   # list of dicts, populated by get_transfer_function()
+        self._data_source        = 'processed'
+        self._noise_transfer_functions = None  # dict with 'mean_ratio' and 'cross_correlation' keys
+
+    @classmethod
+    def from_raw_noise(cls, raw_path, channels, channel_pairs=None,
+                       accel_gain=100.0, downsample_factor=1,
+                       series=None, verbose=True):
+        """
+        Construct a Vibration_Analyzer from raw continuous noise HDF5 data.
+
+        Reads raw accelerometer traces, computes broadband PSDs via Welford's
+        online algorithm, and derives transfer functions via two methods:
+        mean-PSD-ratio and cross-correlation.
+
+        Parameters
+        ----------
+        raw_path : str
+            Path to directory containing raw continuous HDF5 files.
+        channels : list of str
+            Channel names to process (e.g. ['PCS1', 'PCS2']).
+        channel_pairs : list of [str, str], optional
+            Each element is [channel_output, channel_input] for transfer
+            function computation. If None, no transfer functions are computed.
+        accel_gain : float, optional
+            Accelerometer gain factor. Raw ADC values are divided by this
+            to convert to g. Default: 100.0.
+        downsample_factor : int, optional
+            Process every Nth event (1 = all events). Default: 1.
+        series : str or list, optional
+            Filter files by series name. Default: all files in raw_path.
+        verbose : bool, optional
+            Print progress information. Default: True.
+
+        Returns
+        -------
+        Vibration_Analyzer
+            Instance with cached PSDs and (optionally) transfer functions.
+        """
+        # Normalize channel_pairs format
+        if channel_pairs is not None and channel_pairs and isinstance(channel_pairs[0], str):
+            channel_pairs = [channel_pairs]
+
+        # Create instance without calling Analyzer.__init__ (no processed DataFrame)
+        instance = cls.__new__(cls)
+
+        # Initialize Analyzer attributes to safe defaults
+        instance._df = None
+        instance._paths = None
+        instance._series = series
+        instance._cuts = {}
+        instance._vaex_cut_handling = False
+        instance._memory_cache_size = None
+        instance._analysis_repo = None
+
+        # Initialize Vibration_Analyzer attributes
+        instance._psd = None
+        instance._variance = None
+        instance._freqs = None
+        instance._channels = None
+        instance._transfer_functions = None
+        instance._data_source = 'raw_noise'
+        instance._noise_transfer_functions = None
+
+        # Load metadata via detprocess.RawData
+        rawdata = detprocess.RawData(raw_path, data_type='cont', verbose=verbose)
+        sample_rate = rawdata.get_sample_rate(data_type='cont')
+        duration, total_events = rawdata.get_duration(
+            data_type='cont', include_nb_events=True,
+        )
+        total_events = int(total_events)
+
+        # Set up H5Reader for event streaming
+        h5reader = h5io.H5Reader()
+        h5reader.set_files(raw_path, series=series)
+
+        n_channels = len(channels)
+
+        # Welford accumulators — will be initialized on first event (need n_freqs)
+        welford_mean = None   # running mean of PSD (g/sqrt(Hz)), shape (n_channels, n_freqs)
+        welford_m2 = None     # running M2 for variance, shape (n_channels, n_freqs)
+
+        # Cross-correlation accumulators (only if channel_pairs provided)
+        # Each pair: sum of fft_out * conj(fft_in) and sum of |fft_in|^2
+        sum_cross = None  # dict keyed by (ch_out, ch_in) → complex array
+        sum_auto = None   # dict keyed by (ch_out, ch_in) → real array
+
+        if channel_pairs is not None:
+            sum_cross = {}
+            sum_auto = {}
+
+        n_events_processed = 0
+        event_index = 0
+
+        # Event loop: read raw traces and accumulate PSD statistics
+        pbar = tqdm(
+            total=total_events,
+            desc="Processing raw noise events",
+            disable=(not verbose),
+        )
+
+        while True:
+            # Read next event from the raw HDF5 files
+            event_trace, metadata = h5reader.read_next_event(
+                detector_chans=channels,
+                adctoamp=True,
+                include_metadata=True,
+            )
+
+            # End-of-data check
+            if event_trace.size == 0:
+                break
+
+            pbar.update(1)
+            event_index = event_index + 1
+
+            # Downsample: skip events that don't match the stride
+            if event_index % downsample_factor != 0:
+                continue
+
+            n_events_processed = n_events_processed + 1
+
+            # Convert ADC amplitude to g
+            # trace shape: (n_channels, n_samples)
+            traces = event_trace * (1.0 / accel_gain)
+            n_samples = traces.shape[-1]
+
+            # Frequency array (only computed once)
+            if welford_mean is None:
+                n_freqs = n_samples // 2 + 1
+                freqs = np.fft.rfftfreq(n_samples, d=1.0 / sample_rate)
+                welford_mean = np.zeros((n_channels, n_freqs))
+                welford_m2 = np.zeros((n_channels, n_freqs))
+
+                # Initialize cross-correlation accumulators
+                if channel_pairs is not None:
+                    for pair in channel_pairs:
+                        key = (pair[0], pair[1])
+                        sum_cross[key] = np.zeros(n_freqs, dtype=complex)
+                        sum_auto[key] = np.zeros(n_freqs)
+
+            # Compute FFT and one-sided PSD for each channel
+            fft_vals_dict = {}  # cache FFTs for cross-correlation computation
+            for ch_idx in range(n_channels):
+                trace = traces[ch_idx, :]
+
+                # FFT of the trace
+                fft_vals = np.fft.rfft(trace)
+                fft_vals_dict[channels[ch_idx]] = fft_vals
+
+                # Two-sided PSD: |FFT|^2 / (fs * N)
+                psd_two_sided = (np.abs(fft_vals) ** 2) / (sample_rate * n_samples)
+
+                # One-sided: double non-DC/Nyquist bins
+                psd_two_sided[1:-1] = psd_two_sided[1:-1] * 2
+
+                # PSD in g/sqrt(Hz) (square root of power spectral density)
+                psd_val = np.sqrt(psd_two_sided)
+
+                # Welford online update for running mean and variance of PSD (g/sqrt(Hz))
+                delta = psd_val - welford_mean[ch_idx]
+                welford_mean[ch_idx] = welford_mean[ch_idx] + delta / n_events_processed
+                delta2 = psd_val - welford_mean[ch_idx]
+                welford_m2[ch_idx] = welford_m2[ch_idx] + delta * delta2
+
+            # Cross-correlation accumulation for each channel pair
+            if channel_pairs is not None:
+                for pair in channel_pairs:
+                    ch_out, ch_in = pair[0], pair[1]
+                    fft_out = fft_vals_dict[ch_out]
+                    fft_in = fft_vals_dict[ch_in]
+                    key = (ch_out, ch_in)
+
+                    # Accumulate cross-spectrum: fft_out * conj(fft_in)
+                    sum_cross[key] = sum_cross[key] + fft_out * np.conj(fft_in)
+
+                    # Accumulate auto-spectrum of input: |fft_in|^2
+                    sum_auto[key] = sum_auto[key] + np.abs(fft_in) ** 2
+
+        pbar.close()
+
+        if n_events_processed < 2:
+            raise RuntimeError(
+                f"Only {n_events_processed} event(s) processed — need at least 2 "
+                "for variance estimation."
+            )
+
+        # Finalize PSD cache
+        # Store as g^2/Hz (square of mean PSD in g/sqrt(Hz)), matching processed data convention
+        instance._psd = welford_mean ** 2
+        # Variance of the mean PSD estimate: M2 / (n * (n-1))
+        instance._variance = welford_m2 / (n_events_processed * (n_events_processed - 1))
+        instance._freqs = freqs
+        instance._channels = list(channels)
+
+        # Compute transfer functions if channel pairs were provided
+        if channel_pairs is not None:
+            mean_ratio_results = []
+            cross_correlation_results = []
+
+            for pair in channel_pairs:
+                ch_out, ch_in = pair[0], pair[1]
+                idx_out = channels.index(ch_out)
+                idx_in = channels.index(ch_in)
+
+                # --- Method 1: Mean ratio ---
+                # TF = mean_amplitude_out / mean_amplitude_in
+                asd_out = welford_mean[idx_out]
+                asd_in = welford_mean[idx_in]
+
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    tf_ratio = asd_out / asd_in
+
+                # Uncertainty propagation for ratio of means
+                # sigma of each mean PSD estimate
+                sigma_out = np.sqrt(welford_m2[idx_out] / (n_events_processed * (n_events_processed - 1)))
+                sigma_in = np.sqrt(welford_m2[idx_in] / (n_events_processed * (n_events_processed - 1)))
+
+                # sigma_T / T = sqrt( (sigma_out/asd_out)^2 + (sigma_in/asd_in)^2 )
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    tf_ratio_sigma = tf_ratio * np.sqrt(
+                        (sigma_out / asd_out) ** 2.0
+                        + (sigma_in / asd_in) ** 2.0
+                    )
+
+                mean_ratio_results.append({
+                    'channel_output': ch_out,
+                    'channel_input': ch_in,
+                    'transfer_function': tf_ratio,
+                    'transfer_sigma': tf_ratio_sigma,
+                    'freqs': freqs,
+                    'method': 'mean_ratio',
+                })
+
+                # --- Method 2: Cross-correlation ---
+                # TF = |<fft_out * conj(fft_in)>| / <|fft_in|^2>
+                key = (ch_out, ch_in)
+                mean_cross = sum_cross[key] / n_events_processed
+                mean_auto_in = sum_auto[key] / n_events_processed
+
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    tf_cross = np.abs(mean_cross / mean_auto_in)
+
+                # Cross-correlation uncertainty is not analytically straightforward;
+                # store NaN placeholder for transfer_sigma
+                cross_correlation_results.append({
+                    'channel_output': ch_out,
+                    'channel_input': ch_in,
+                    'transfer_function': tf_cross,
+                    'transfer_sigma': np.full_like(tf_cross, np.nan),
+                    'freqs': freqs,
+                    'method': 'cross_correlation',
+                })
+
+            instance._noise_transfer_functions = {
+                'mean_ratio': mean_ratio_results,
+                'cross_correlation': cross_correlation_results,
+            }
+
+            # Default transfer functions point to mean_ratio results
+            instance._transfer_functions = list(mean_ratio_results)
+
+        return instance
+
+    def get_noise_transfer_function(self, method='mean_ratio'):
+        """
+        Return cached noise transfer functions for the specified method.
+
+        Only available for instances created via from_raw_noise().
+
+        Parameters
+        ----------
+        method : str
+            'mean_ratio' or 'cross_correlation'.
+
+        Returns
+        -------
+        list of dict
+            Same schema as get_transfer_function() output:
+            each dict has 'channel_output', 'channel_input',
+            'transfer_function', 'transfer_sigma', 'freqs'.
+        """
+        if self._noise_transfer_functions is None:
+            raise RuntimeError(
+                "No noise transfer functions available. "
+                "Use from_raw_noise() with channel_pairs to compute them."
+            )
+
+        if method not in ('mean_ratio', 'cross_correlation'):
+            raise ValueError(
+                f"Unknown method '{method}'. Use 'mean_ratio' or 'cross_correlation'."
+            )
+
+        return self._noise_transfer_functions[method]
 
     def get_psd(self, channels, return_freqs=True):
         """
@@ -80,6 +389,13 @@ class Vibration_Analyzer(Analyzer):
         freqs : np.ndarray, shape (n_freqs,)  [only if return_freqs=True]
             Sorted unique frequencies in Hz.
         """
+        if self._data_source == 'raw_noise':
+            raise RuntimeError(
+                "get_psd() is not available for raw noise instances. "
+                "PSDs were already computed during from_raw_noise(); "
+                "access them via self._psd, self._variance, self._freqs."
+            )
+
         df = self.df
 
         freqs = sorted(df['frequency_hz'].unique())
@@ -148,99 +464,518 @@ class Vibration_Analyzer(Analyzer):
             return psd, variance, freqs
         return psd, variance
 
-    def get_transfer_function(self, channel_pairs):
+    def _compute_tf_from_traces(self, channel_pairs, methods):
         """
-        Compute the ASD transfer function for one or more channel pairs.
+        Compute transfer function estimators directly from per-trace complex amplitudes.
 
-        Uses internally cached PSDs when all required channels are already present;
-        otherwise extends the PSD cache to include any missing channels (existing
-        cached channels are preserved).
+        Iterates over unique frequencies once and computes all requested estimators
+        in a single pass, avoiding redundant data reads.
 
         Parameters
         ----------
         channel_pairs : list of [str, str]
             Each element is [channel_output, channel_input].
-            E.g. [['Stage1', 'Ground'], ['Stage2', 'Ground']] computes two transfer
-            functions sharing the same 'Ground' PSD computation.
+        methods : list of str
+            Subset of VALID_TF_METHODS: 'mean_ratio', 'cross_correlation',
+            'phase_locked'.
 
         Returns
         -------
-        transfer_functions : list of dict
+        results : dict
+            Keys are method names from ``methods``. Values are lists of dicts
+            (one per channel pair). Each dict contains:
+              'channel_output'    : str
+              'channel_input'     : str
+              'transfer_function' : np.ndarray — real for mean_ratio, complex
+                                    for cross_correlation and phase_locked
+              'transfer_sigma'    : np.ndarray — 1-sigma uncertainty (NaN where
+                                    analytically intractable)
+              'freqs'             : np.ndarray, shape (n_freqs,)
+              'method'            : str
+        """
+        df = self.df
+
+        freqs = sorted(df['frequency_hz'].unique())
+        n_freqs = len(freqs)
+        n_pairs = len(channel_pairs)
+
+        # Pre-allocate output arrays for each method and each channel pair.
+        # mean_ratio is real; cross_correlation and phase_locked are complex.
+        arrays = {}
+        for method in methods:
+            if method == 'mean_ratio':
+                dtype = float
+            else:
+                dtype = complex
+            arrays[method] = {
+                'tf': np.zeros((n_pairs, n_freqs), dtype=dtype),
+                'sigma': np.full((n_pairs, n_freqs), np.nan),
+            }
+
+        freqs_arr = np.array(freqs)
+
+        # Single pass over all frequencies: extract per-trace complex amplitudes
+        # and compute all requested estimators at each frequency bin.
+        for f_idx, freq in enumerate(freqs):
+            rows = df[df.frequency_hz == freq]
+
+            # Loop over each channel pair at this frequency
+            for p_idx, (ch_out, ch_in) in enumerate(channel_pairs):
+                # Build complex amplitudes from real + imaginary fit coefficients
+                real_out = rows[f'amp_real_{ch_out}'].values
+                imag_out = rows[f'amp_imag_{ch_out}'].values
+                real_in = rows[f'amp_real_{ch_in}'].values
+                imag_in = rows[f'amp_imag_{ch_in}'].values
+
+                z_out = np.array(real_out, dtype=float) + 1j * np.array(imag_out, dtype=float)
+                z_in = np.array(real_in, dtype=float) + 1j * np.array(imag_in, dtype=float)
+                n_traces = len(z_out)
+
+                # Mean complex amplitudes (used by mean_ratio and phase_locked)
+                mean_z_out = np.mean(z_out)
+                mean_z_in = np.mean(z_in)
+
+                # --- Mean Ratio estimator ---
+                # TF = |mean(z_out)| / |mean(z_in)|
+                # Equivalent to the old PSD-based calculation (Δf cancels in the ratio).
+                # This is the magnitude of the phase-locked estimator; phase is discarded.
+                if 'mean_ratio' in methods:
+                    abs_mean_out = np.abs(mean_z_out)
+                    abs_mean_in = np.abs(mean_z_in)
+
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        tf_mr = abs_mean_out / abs_mean_in
+
+                    arrays['mean_ratio']['tf'][p_idx, f_idx] = tf_mr
+
+                    # Uncertainty propagation from variance of mean real/imag components.
+                    # var(mean_re) = var(re) / n, var(mean_im) = var(im) / n
+                    var_mean_re_out = np.var(real_out, ddof=1) / n_traces
+                    var_mean_im_out = np.var(imag_out, ddof=1) / n_traces
+                    var_mean_re_in = np.var(real_in, ddof=1) / n_traces
+                    var_mean_im_in = np.var(imag_in, ddof=1) / n_traces
+
+                    # Variance of |mean(z)| via error propagation:
+                    # |z| = sqrt(re^2 + im^2)
+                    # d|z|/d(re) = re / |z|,  d|z|/d(im) = im / |z|
+                    # var(|z|) = (re/|z|)^2 * var(re) + (im/|z|)^2 * var(im)
+                    re_out = mean_z_out.real
+                    im_out = mean_z_out.imag
+                    re_in = mean_z_in.real
+                    im_in = mean_z_in.imag
+
+                    if abs_mean_out > 0:
+                        var_abs_out = (
+                            (re_out / abs_mean_out) ** 2 * var_mean_re_out
+                            + (im_out / abs_mean_out) ** 2 * var_mean_im_out
+                        )
+                        sigma_abs_out = np.sqrt(var_abs_out)
+                    else:
+                        sigma_abs_out = 0.0
+
+                    if abs_mean_in > 0:
+                        var_abs_in = (
+                            (re_in / abs_mean_in) ** 2 * var_mean_re_in
+                            + (im_in / abs_mean_in) ** 2 * var_mean_im_in
+                        )
+                        sigma_abs_in = np.sqrt(var_abs_in)
+                    else:
+                        sigma_abs_in = 0.0
+
+                    # Ratio uncertainty: sigma_T / T = sqrt((sigma_out/out)^2 + (sigma_in/in)^2)
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        tf_sigma_mr = tf_mr * np.sqrt(
+                            (sigma_abs_out / abs_mean_out) ** 2
+                            + (sigma_abs_in / abs_mean_in) ** 2
+                        )
+                    arrays['mean_ratio']['sigma'][p_idx, f_idx] = tf_sigma_mr
+
+                # --- Cross-Correlation estimator ---
+                # TF₂ = ⟨C₁₀⟩ / ⟨P₀₀⟩  where  C₁₀,ᵢ = z_out,ᵢ · conj(z_in,ᵢ)
+                #                              and  P₀₀,ᵢ = |z_in,ᵢ|²
+                # Complex output — preserves phase. Only biased by input noise.
+                if 'cross_correlation' in methods:
+                    # Per-trace cross-spectral and auto-spectral products
+                    c10 = z_out * np.conj(z_in)   # complex, shape (n_traces,)
+                    p00 = np.abs(z_in) ** 2        # real, shape (n_traces,)
+
+                    mean_c10 = np.mean(c10)
+                    mean_p00 = np.mean(p00)
+
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        tf_cc = mean_c10 / mean_p00
+
+                    arrays['cross_correlation']['tf'][p_idx, f_idx] = tf_cc
+
+                    # Uncertainty via ratio error propagation:
+                    # sigma_|TF₂| = |TF₂| * sqrt(Var(⟨C₁₀⟩)/|⟨C₁₀⟩|² + Var(⟨P₀₀⟩)/⟨P₀₀⟩²)
+                    #
+                    # Var(⟨C₁₀⟩) = σ²_C₁₀ / n  where σ²_C₁₀ is the sample variance
+                    # of the complex per-trace cross-spectral products.
+                    # Var(⟨P₀₀⟩) = σ²_P₀₀ / n  where σ²_P₀₀ is the sample variance
+                    # of the real per-trace auto-spectral values.
+                    var_c10 = np.sum(np.abs(c10 - mean_c10) ** 2) / (n_traces - 1)
+                    var_mean_c10 = var_c10 / n_traces
+
+                    var_p00 = np.var(p00, ddof=1)
+                    var_mean_p00 = var_p00 / n_traces
+
+                    abs_mean_c10 = np.abs(mean_c10)
+                    abs_tf_cc = np.abs(tf_cc)
+
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        tf_sigma_cc = abs_tf_cc * np.sqrt(
+                            var_mean_c10 / (abs_mean_c10 ** 2)
+                            + var_mean_p00 / (mean_p00 ** 2)
+                        )
+                    arrays['cross_correlation']['sigma'][p_idx, f_idx] = tf_sigma_cc
+
+                # --- Phase-Locked estimator ---
+                # TF₃ = ⟨z_out'⟩ / ⟨z_in'⟩
+                # Complex output — preserves phase. Unbiased (best estimator).
+                # Requires active transducer excitation.
+                if 'phase_locked' in methods:
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        tf_pl = mean_z_out / mean_z_in
+
+                    arrays['phase_locked']['tf'][p_idx, f_idx] = tf_pl
+
+                    # Uncertainty via ratio error propagation:
+                    # sigma_|TF₃| = |TF₃| * sqrt(Var(⟨z₁'⟩)/|⟨z₁'⟩|² + Var(⟨z₀'⟩)/|⟨z₀'⟩|²)
+                    #
+                    # For a complex phasor z' = A + iB:
+                    #   Var(z') = σ²_A + σ²_B
+                    #   Var(⟨z'⟩) = Var(z') / n = (σ²_A + σ²_B) / n
+                    var_z_out = np.var(real_out, ddof=1) + np.var(imag_out, ddof=1)
+                    var_mean_z_out = var_z_out / n_traces
+
+                    var_z_in = np.var(real_in, ddof=1) + np.var(imag_in, ddof=1)
+                    var_mean_z_in = var_z_in / n_traces
+
+                    abs_mean_out = np.abs(mean_z_out)
+                    abs_mean_in = np.abs(mean_z_in)
+                    abs_tf_pl = np.abs(tf_pl)
+
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        tf_sigma_pl = abs_tf_pl * np.sqrt(
+                            var_mean_z_out / (abs_mean_out ** 2)
+                            + var_mean_z_in / (abs_mean_in ** 2)
+                        )
+                    arrays['phase_locked']['sigma'][p_idx, f_idx] = tf_sigma_pl
+
+        # Assemble result dicts from the pre-allocated arrays
+        results = {}
+        for method in methods:
+            method_results = []
+            # Loop over each channel pair and build the result dict
+            for p_idx, (ch_out, ch_in) in enumerate(channel_pairs):
+                method_results.append({
+                    'channel_output':    ch_out,
+                    'channel_input':     ch_in,
+                    'transfer_function': arrays[method]['tf'][p_idx, :],
+                    'transfer_sigma':    arrays[method]['sigma'][p_idx, :],
+                    'freqs':             freqs_arr,
+                    'method':            method,
+                })
+            results[method] = method_results
+
+        return results
+
+    def get_transfer_function(self, channel_pairs, methods=None):
+        """
+        Compute transfer function estimators for one or more channel pairs.
+
+        Three estimation methods are available, each operating on per-trace
+        complex amplitudes z = A + iB at each drive frequency:
+
+          - 'mean_ratio':       |mean(z_out)| / |mean(z_in)|  (real, amplitude only)
+          - 'cross_correlation': mean(z_out * conj(z_in)) / mean(|z_in|^2)  (complex)
+          - 'phase_locked':     mean(z_out) / mean(z_in)  (complex)
+
+        When ``methods`` is not provided, the mean_ratio estimator is computed
+        and the return format matches the legacy API (list of dicts).
+
+        Parameters
+        ----------
+        channel_pairs : list of [str, str]
+            Each element is [channel_output, channel_input].
+            E.g. [['Stage1', 'Ground'], ['Stage2', 'Ground']] computes transfer
+            functions sharing the same 'Ground' input computation.
+        methods : str or list of str, optional
+            Which estimator(s) to compute. One or more of 'mean_ratio',
+            'cross_correlation', 'phase_locked'. If None (default), computes
+            'mean_ratio' and returns the legacy list-of-dicts format for
+            backward compatibility.
+
+        Returns
+        -------
+        list of dict  (when ``methods=None``)
             One dict per pair, each containing:
               'channel_output'    : str
               'channel_input'     : str
-              'transfer_function' : np.ndarray, shape (n_freqs,) — ASD_out / ASD_in
+              'transfer_function' : np.ndarray, shape (n_freqs,) — real amplitude
               'transfer_sigma'    : np.ndarray, shape (n_freqs,) — 1-sigma uncertainty
               'freqs'             : np.ndarray, shape (n_freqs,)
+
+        dict of {str: list of dict}  (when ``methods`` is provided)
+            Keys are the requested method names. Values are lists of dicts
+            (one per channel pair) with the same schema as above plus a
+            'method' key. For 'cross_correlation' and 'phase_locked', the
+            'transfer_function' array is complex-valued.
         """
+        if self._data_source == 'raw_noise':
+            raise RuntimeError(
+                "get_transfer_function() is not available for raw noise instances. "
+                "Transfer functions were already computed during from_raw_noise(); "
+                "use get_noise_transfer_function() to access them."
+            )
+
         # Normalize a bare pair like ['Stage1', 'Ground'] to [['Stage1', 'Ground']]
         if channel_pairs and isinstance(channel_pairs[0], str):
             channel_pairs = [channel_pairs]
 
-        # Collect all unique channels needed across all pairs (preserve insertion order)
-        all_needed = list(dict.fromkeys(ch for pair in channel_pairs for ch in pair))
+        # Legacy backward-compatible path: methods=None → mean_ratio only, flat list output
+        if methods is None:
+            results = self._compute_tf_from_traces(
+                channel_pairs=channel_pairs,
+                methods=['mean_ratio'],
+            )
+            flat_results = []
+            # Strip the 'method' key from each dict to match legacy schema
+            for d in results['mean_ratio']:
+                legacy_dict = {k: v for k, v in d.items() if k != 'method'}
+                flat_results.append(legacy_dict)
 
-        # Determine which channels are not yet in the PSD cache
-        cached = self._channels if self._channels is not None else []
-        missing = [ch for ch in all_needed if ch not in cached]
+            # Cache under 'mean_ratio' key internally
+            self._upsert_tf_cache('mean_ratio', flat_results)
+            return flat_results
 
-        # Extend the PSD cache to include missing channels without dropping existing data
-        if missing:
-            self.get_psd(channels=list(dict.fromkeys(cached + missing)))
+        # Normalize a single method string to a list
+        if isinstance(methods, str):
+            methods = [methods]
 
-        # Compute TF for each pair and collect into a list of dicts
-        results = []
-        for channel_output, channel_input in channel_pairs:
-            idx_out = self._channels.index(channel_output)
-            idx_in  = self._channels.index(channel_input)
-
-            # Convert PSD to ASD: ASD = sqrt(PSD)
-            asd_output = np.sqrt(self._psd[idx_out])
-            asd_input  = np.sqrt(self._psd[idx_in])
-
-            # Transfer function: T(f) = ASD_output(f) / ASD_input(f)
-            with np.errstate(divide='ignore', invalid='ignore'):
-                tf = asd_output / asd_input
-
-            sigma_output = np.sqrt(self._variance[idx_out])
-            sigma_input  = np.sqrt(self._variance[idx_in])
-
-            # Uncertainty propagation for a ratio:
-            # sigma_T / T = sqrt( (sigma_out / ASD_out)^2 + (sigma_in / ASD_in)^2 )
-            with np.errstate(divide='ignore', invalid='ignore'):
-                tf_sigma = tf * np.sqrt(
-                    (sigma_output / asd_output) ** 2.0
-                    + (sigma_input / asd_input) ** 2.0
+        # Validate method names
+        for m in methods:
+            if m not in self.VALID_TF_METHODS:
+                raise ValueError(
+                    f"Unknown method '{m}'. "
+                    f"Valid methods: {self.VALID_TF_METHODS}"
                 )
 
-            results.append({
-                'channel_output':    channel_output,
-                'channel_input':     channel_input,
-                'transfer_function': tf,
-                'transfer_sigma':    tf_sigma,
-                'freqs':             self._freqs,
-            })
+        results = self._compute_tf_from_traces(
+            channel_pairs=channel_pairs,
+            methods=methods,
+        )
 
-        # Upsert: preserve cached pairs not recomputed, then append new results
-        existing = [
-            d for d in (self._transfer_functions or [])
-            if not any(
-                d['channel_output'] == r['channel_output']
-                and d['channel_input'] == r['channel_input']
-                for r in results
-            )
-        ]
-        self._transfer_functions = existing + results
+        # Cache results per method
+        for method_name, method_results in results.items():
+            self._upsert_tf_cache(method_name, method_results)
+
         return results
 
-    def plot_transfer_function(self, channel_pairs=None, figsize=(14, 6)):
+    def _upsert_tf_cache(self, method_name, new_results):
         """
-        Plot the transfer function for one or more channel pairs with 1-sigma uncertainty
-        bands and a secondary dB axis.
+        Upsert transfer function results into the internal cache.
 
-        Uses internally cached transfer functions from a prior get_transfer_function() call
-        when available. If any requested pair is not yet cached, get_transfer_function() is
-        called automatically for the missing pairs before plotting.
+        Preserves cached pairs not present in ``new_results`` and replaces
+        pairs that match.
+
+        Parameters
+        ----------
+        method_name : str
+            The estimation method key (e.g. 'mean_ratio').
+        new_results : list of dict
+            New TF result dicts to cache for this method.
+        """
+        if self._transfer_functions is None:
+            self._transfer_functions = {}
+
+        existing = self._transfer_functions.get(method_name, [])
+
+        # Keep existing entries whose (ch_out, ch_in) pair is not in new_results
+        new_pair_keys = {
+            (r['channel_output'], r['channel_input']) for r in new_results
+        }
+        kept = [
+            d for d in existing
+            if (d['channel_output'], d['channel_input']) not in new_pair_keys
+        ]
+        self._transfer_functions[method_name] = kept + list(new_results)
+
+    # Linestyle mapping for multi-method overlay plots
+    _METHOD_LINESTYLES = {
+        'mean_ratio':       ('-',  ' (mean ratio)'),
+        'cross_correlation': ('--', ' (cross-correlation)'),
+        'phase_locked':     ('-.', ' (phase-locked)'),
+    }
+
+    def _resolve_tf_pairs_to_plot(self, channel_pairs, method):
+        """
+        Resolve which transfer function dicts to plot based on method and channel_pairs.
+
+        Parameters
+        ----------
+        channel_pairs : list of [str, str] or None
+            Requested pairs. If None, all available pairs are used.
+        method : str or None
+            For processed data: 'mean_ratio', 'cross_correlation', 'phase_locked',
+            'all' (overlay all cached methods), or None (default: mean_ratio).
+            For raw noise: 'mean_ratio', 'cross_correlation', 'both', or None.
+
+        Returns
+        -------
+        plot_groups : list of (list_of_tf_dicts, linestyle, label_suffix)
+            Each group is a set of TF dicts to plot with the given style.
+        """
+        groups = []
+
+        if self._data_source == 'raw_noise' and method is not None:
+            # Raw noise mode with explicit method selection
+            if self._noise_transfer_functions is None:
+                raise RuntimeError(
+                    "No noise transfer functions available. "
+                    "Use from_raw_noise() with channel_pairs to compute them."
+                )
+
+            methods_to_plot = []
+            if method in ('both', 'all'):
+                methods_to_plot = [('mean_ratio', '-', ' (mean ratio)'),
+                                   ('cross_correlation', '--', ' (cross-correlation)')]
+            elif method in ('mean_ratio', 'cross_correlation'):
+                methods_to_plot = [(method, '-', '')]
+            else:
+                raise ValueError(
+                    f"Unknown method '{method}'. "
+                    "Use 'mean_ratio', 'cross_correlation', 'both', or 'all'."
+                )
+
+            # Resolve TF dicts for each method
+            for m, ls, suffix in methods_to_plot:
+                tf_list = self._noise_transfer_functions[m]
+
+                if channel_pairs is not None:
+                    tf_lookup = {
+                        (d['channel_output'], d['channel_input']): d
+                        for d in tf_list
+                    }
+                    filtered = [tf_lookup[(p[0], p[1])] for p in channel_pairs]
+                else:
+                    filtered = list(tf_list)
+
+                groups.append((filtered, ls, suffix))
+
+        elif self._data_source == 'processed' and method is not None:
+            # Processed data mode with explicit method selection
+            if self._transfer_functions is None:
+                raise RuntimeError(
+                    "No transfer functions cached. Call get_transfer_function() first "
+                    "or pass channel_pairs= explicitly."
+                )
+
+            # Determine which methods to overlay.
+            # method can be a single string or a list of method names.
+            if isinstance(method, list):
+                # Explicit list of methods to overlay
+                for m in method:
+                    if m not in self.VALID_TF_METHODS:
+                        raise ValueError(
+                            f"Unknown method '{m}'. "
+                            f"Valid: {self.VALID_TF_METHODS}"
+                        )
+                method_keys = list(method)
+            elif method == 'all':
+                # Overlay all cached methods
+                method_keys = [
+                    m for m in self.VALID_TF_METHODS
+                    if m in self._transfer_functions and self._transfer_functions[m]
+                ]
+            elif method in self.VALID_TF_METHODS:
+                method_keys = [method]
+            else:
+                raise ValueError(
+                    f"Unknown method '{method}'. "
+                    f"Valid: {self.VALID_TF_METHODS + ('all',)}"
+                )
+
+            # Build plot groups: one per method
+            show_suffix = len(method_keys) > 1
+            for m in method_keys:
+                if m not in self._transfer_functions:
+                    raise RuntimeError(
+                        f"Method '{m}' not cached. "
+                        f"Call get_transfer_function(methods=['{m}']) first."
+                    )
+                tf_list = self._transfer_functions[m]
+                ls, suffix = self._METHOD_LINESTYLES[m]
+
+                if channel_pairs is not None:
+                    tf_lookup = {
+                        (d['channel_output'], d['channel_input']): d
+                        for d in tf_list
+                    }
+                    filtered = [tf_lookup[(p[0], p[1])] for p in channel_pairs]
+                else:
+                    filtered = list(tf_list)
+
+                groups.append((filtered, ls, suffix if show_suffix else ''))
+
+        else:
+            # Default behavior (method=None): use mean_ratio from cache
+            if self._transfer_functions is None:
+                if channel_pairs is not None and self._data_source != 'raw_noise':
+                    # Auto-compute mean_ratio for missing pairs
+                    self.get_transfer_function(channel_pairs=channel_pairs)
+                else:
+                    raise RuntimeError(
+                        "No transfer functions cached. Call get_transfer_function() first "
+                        "or pass channel_pairs= explicitly."
+                    )
+
+            # Prefer mean_ratio from the dict cache; fall back to flat list for legacy
+            if isinstance(self._transfer_functions, dict):
+                tf_list = self._transfer_functions.get('mean_ratio', [])
+            else:
+                tf_list = self._transfer_functions
+
+            if channel_pairs is not None:
+                # Auto-compute if needed
+                if self._data_source != 'raw_noise':
+                    cached_pair_keys = {
+                        (d['channel_output'], d['channel_input']) for d in tf_list
+                    }
+                    missing = [p for p in channel_pairs if tuple(p) not in cached_pair_keys]
+                    if missing:
+                        self.get_transfer_function(channel_pairs=missing)
+                        # Re-fetch after computation
+                        if isinstance(self._transfer_functions, dict):
+                            tf_list = self._transfer_functions.get('mean_ratio', [])
+                        else:
+                            tf_list = self._transfer_functions
+
+                tf_lookup = {
+                    (d['channel_output'], d['channel_input']): d
+                    for d in tf_list
+                }
+                pairs_list = [tf_lookup[(p[0], p[1])] for p in channel_pairs]
+            else:
+                pairs_list = list(tf_list)
+
+            groups.append((pairs_list, '-', ''))
+
+        return groups
+
+    def plot_transfer_function(self, channel_pairs=None, figsize=(14, 6), method=None,
+                               show_uncertainty=True):
+        """
+        Plot the transfer function magnitude for one or more channel pairs with
+        1-sigma uncertainty bands and a secondary dB axis.
+
+        Uses internally cached transfer functions from a prior get_transfer_function()
+        call when available. If any requested pair is not yet cached,
+        get_transfer_function() is called automatically for the missing pairs.
+
+        For complex-valued transfer functions (cross_correlation, phase_locked),
+        the magnitude is plotted. Use plot_transfer_function_phase() for phase plots.
 
         Parameters
         ----------
@@ -250,6 +985,18 @@ class Vibration_Analyzer(Analyzer):
             If None, all currently cached transfer functions are plotted.
         figsize : tuple of (float, float), optional
             Figure size passed to plt.subplots. Default: (14, 6).
+        method : str or list of str, optional
+            Which estimation method(s) to plot:
+              - 'mean_ratio', 'cross_correlation', 'phase_locked': plot one method
+              - A list like ['mean_ratio', 'phase_locked']: overlay selected methods
+              - 'all': overlay all cached methods with distinct linestyles
+              - 'both': alias for 'all' (backward compatibility with raw noise)
+              - None: default (mean_ratio for processed data)
+        show_uncertainty : bool or list of bool, optional
+            Whether to draw the 1-sigma uncertainty band for each method group.
+            If a single bool, applies to all method groups. If a list, must have
+            one entry per method group (same length as the resolved method list).
+            Default: True.
 
         Returns
         -------
@@ -260,85 +1007,97 @@ class Vibration_Analyzer(Analyzer):
         if channel_pairs is not None and channel_pairs and isinstance(channel_pairs[0], str):
             channel_pairs = [channel_pairs]
 
-        # If no pairs specified, plot everything currently cached
-        if channel_pairs is None:
-            if self._transfer_functions is None:
-                raise RuntimeError(
-                    "No transfer functions cached. Call get_transfer_function() first "
-                    "or pass channel_pairs= explicitly."
-                )
-            channel_pairs = [
-                [d['channel_output'], d['channel_input']]
-                for d in self._transfer_functions
-            ]
-
-        # Compute any pairs not yet in the cache (existing cached pairs are preserved)
-        cached_pairs = (
-            {(d['channel_output'], d['channel_input']) for d in self._transfer_functions}
-            if self._transfer_functions is not None
-            else set()
+        # Resolve which TF dicts to plot, grouped by method/linestyle
+        plot_groups = self._resolve_tf_pairs_to_plot(
+            channel_pairs=channel_pairs, method=method,
         )
-        missing_pairs = [p for p in channel_pairs if tuple(p) not in cached_pairs]
-        if missing_pairs:
-            self.get_transfer_function(channel_pairs=missing_pairs)
 
-        # Build a lookup dict so we can collect pairs in the requested order
-        tf_lookup = {
-            (d['channel_output'], d['channel_input']): d
-            for d in self._transfer_functions
-        }
-        pairs_to_plot = [tf_lookup[(p[0], p[1])] for p in channel_pairs]
+        # Normalize show_uncertainty to a list with one bool per plot group
+        n_groups = len(plot_groups)
+        if isinstance(show_uncertainty, bool):
+            show_uncertainty_per_group = [show_uncertainty] * n_groups
+        else:
+            show_uncertainty_per_group = list(show_uncertainty)
+            if len(show_uncertainty_per_group) != n_groups:
+                raise ValueError(
+                    f"show_uncertainty has {len(show_uncertainty_per_group)} entries "
+                    f"but there are {n_groups} method group(s) to plot. "
+                    "Pass a single bool or a list matching the number of methods."
+                )
 
         fig, ax = plt.subplots(figsize=figsize)
         prop_cycle_colors = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
 
         all_tf_values = []
-        for i, tf_dict in enumerate(pairs_to_plot):
-            ch_out = tf_dict['channel_output']
-            ch_in  = tf_dict['channel_input']
-            freqs  = tf_dict['freqs']
-            tf     = tf_dict['transfer_function']
-            tf_sig = tf_dict['transfer_sigma']
-            color  = prop_cycle_colors[i % len(prop_cycle_colors)]
-            all_tf_values.append(tf)
+        color_index = 0
 
-            # Plot mean transfer function
-            ax.loglog(
-                freqs,
-                tf,
-                marker="o",
-                markersize=0,
-                linestyle="-",
-                label=f"{ch_out} / {ch_in}",
-                color=color,
-                alpha=0.5,
-            )
+        # Plot each group (one group per method when overlaying multiple methods)
+        for group_idx, (pairs_to_plot, linestyle, label_suffix) in enumerate(plot_groups):
+            draw_uncertainty = show_uncertainty_per_group[group_idx]
 
-            # Build 1-sigma bounds; keep lower bound positive for log-scale plotting
-            lower = np.maximum(tf - tf_sig, np.finfo(float).tiny)
-            upper = tf + tf_sig
+            for i, tf_dict in enumerate(pairs_to_plot):
+                ch_out = tf_dict['channel_output']
+                ch_in  = tf_dict['channel_input']
+                freqs  = tf_dict['freqs']
+                tf_raw = tf_dict['transfer_function']
+                tf_sig = tf_dict['transfer_sigma']
+                color  = prop_cycle_colors[(color_index + i) % len(prop_cycle_colors)]
 
-            # Draw uncertainty band
-            ax.fill_between(
-                freqs,
-                lower,
-                upper,
-                color=color,
-                alpha=0.2,
-                linewidth=1,
-                label="±σ/√n",
-            )
+                # For complex TFs (cross_correlation, phase_locked), plot magnitude
+                tf_mag = np.abs(tf_raw) if np.iscomplexobj(tf_raw) else tf_raw
+                all_tf_values.append(tf_mag)
+
+                # Plot transfer function magnitude
+                ax.loglog(
+                    freqs,
+                    tf_mag,
+                    marker="o",
+                    markersize=0,
+                    linestyle=linestyle,
+                    label=f"{ch_out} / {ch_in}{label_suffix}",
+                    color=color,
+                    alpha=0.5,
+                )
+
+                # Draw uncertainty band if enabled and sigma is not all NaN
+                if draw_uncertainty and not np.all(np.isnan(tf_sig)):
+                    # Build 1-sigma bounds; keep lower bound positive for log-scale
+                    lower = np.maximum(tf_mag - tf_sig, np.finfo(float).tiny)
+                    upper = tf_mag + tf_sig
+
+                    ax.fill_between(
+                        freqs,
+                        lower,
+                        upper,
+                        color=color,
+                        alpha=0.2,
+                        linewidth=1,
+                        label=f"±σ/√n{label_suffix}",
+                    )
+
+            # For multi-method overlay, keep same color mapping across methods
+            if method not in ('both', 'all') and not isinstance(method, list):
+                color_index = color_index + len(pairs_to_plot)
 
         # Set y-limits across all plotted transfer functions
         all_tf_concat = np.concatenate(all_tf_values)
-        ax.set_ylim(all_tf_concat.min() * 0.8, all_tf_concat.max() * 1.2)
+        finite_vals = all_tf_concat[np.isfinite(all_tf_concat) & (all_tf_concat > 0)]
+        if finite_vals.size > 0:
+            ax.set_ylim(finite_vals.min() * 0.8, finite_vals.max() * 1.2)
 
         ax.set_xlabel("Frequency (Hz)")
 
+        # Collect all unique pairs across all groups for labeling
+        all_pairs_flat = [
+            tf_dict for group in plot_groups for tf_dict in group[0]
+        ]
+        unique_pair_keys = list(dict.fromkeys(
+            (d['channel_output'], d['channel_input']) for d in all_pairs_flat
+        ))
+
         # Single-pair label names the channels; multi-pair uses a generic label
-        if len(pairs_to_plot) == 1:
-            ch_out = pairs_to_plot[0]['channel_output']
-            ch_in  = pairs_to_plot[0]['channel_input']
+        if len(unique_pair_keys) == 1:
+            ch_out, ch_in = unique_pair_keys[0]
             ax.set_ylabel(f"Attenuation ({ch_out}/{ch_in})")
         else:
             ax.set_ylabel("Attenuation")
@@ -368,7 +1127,160 @@ class Vibration_Analyzer(Analyzer):
 
         return fig, ax
 
-    def plot_psd(self, channels=None, figsize=(14, 6)):
+    def plot_transfer_function_phase(self, channel_pairs=None, figsize=(14, 6),
+                                     method=None):
+        """
+        Plot the transfer function phase for one or more channel pairs.
+
+        Only works with complex-valued transfer function methods
+        ('cross_correlation' or 'phase_locked'). The 'mean_ratio' method
+        discards phase information and cannot be plotted here.
+
+        Parameters
+        ----------
+        channel_pairs : list of [str, str] or [str, str], optional
+            Each element is [channel_output, channel_input]. A bare pair like
+            ['Stage1', 'Ground'] is also accepted.
+            If None, all currently cached pairs for the given method are plotted.
+        figsize : tuple of (float, float), optional
+            Figure size passed to plt.subplots. Default: (14, 6).
+        method : str, optional
+            Which estimation method to plot: 'cross_correlation', 'phase_locked',
+            or 'all' (overlay both). Default: 'phase_locked' if cached, else
+            'cross_correlation'.
+
+        Returns
+        -------
+        fig : matplotlib.figure.Figure
+        ax  : matplotlib.axes.Axes
+        """
+        # Normalize a bare pair like ['Stage1', 'Ground'] to [['Stage1', 'Ground']]
+        if channel_pairs is not None and channel_pairs and isinstance(channel_pairs[0], str):
+            channel_pairs = [channel_pairs]
+
+        # Determine which complex methods to plot
+        complex_methods = ('cross_correlation', 'phase_locked')
+
+        if method is None:
+            # Auto-select: prefer phase_locked if cached, else cross_correlation
+            if (self._transfer_functions is not None
+                    and 'phase_locked' in self._transfer_functions):
+                method = 'phase_locked'
+            elif (self._transfer_functions is not None
+                    and 'cross_correlation' in self._transfer_functions):
+                method = 'cross_correlation'
+            else:
+                raise RuntimeError(
+                    "No complex-valued transfer functions cached. "
+                    "Call get_transfer_function(methods=['phase_locked']) or "
+                    "get_transfer_function(methods=['cross_correlation']) first."
+                )
+
+        # Reject mean_ratio (no phase info) whether passed as string or in a list
+        if method == 'mean_ratio':
+            raise ValueError(
+                "The 'mean_ratio' method discards phase information. "
+                "Use 'cross_correlation' or 'phase_locked' for phase plots."
+            )
+        if isinstance(method, list) and 'mean_ratio' in method:
+            raise ValueError(
+                "The 'mean_ratio' method discards phase information. "
+                "Use 'cross_correlation' or 'phase_locked' for phase plots."
+            )
+
+        # Build list of methods to overlay.
+        # method can be a single string or a list of method names.
+        if isinstance(method, list):
+            for m in method:
+                if m not in complex_methods:
+                    raise ValueError(
+                        f"Unknown or non-complex method '{m}'. "
+                        f"Valid for phase plots: {complex_methods}"
+                    )
+            method_keys = list(method)
+        elif method == 'all':
+            method_keys = [
+                m for m in complex_methods
+                if (self._transfer_functions is not None
+                    and m in self._transfer_functions
+                    and self._transfer_functions[m])
+            ]
+            if not method_keys:
+                raise RuntimeError(
+                    "No complex-valued transfer functions cached. "
+                    "Call get_transfer_function(methods=[...]) first."
+                )
+        elif method in complex_methods:
+            method_keys = [method]
+        else:
+            raise ValueError(
+                f"Unknown method '{method}'. "
+                f"Valid for phase plots: {complex_methods + ('all',)}"
+            )
+
+        fig, ax = plt.subplots(figsize=figsize)
+        prop_cycle_colors = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
+
+        show_suffix = len(method_keys) > 1
+        color_index = 0
+
+        # Plot each method group
+        for m in method_keys:
+            if m not in self._transfer_functions:
+                raise RuntimeError(
+                    f"Method '{m}' not cached. "
+                    f"Call get_transfer_function(methods=['{m}']) first."
+                )
+
+            tf_list = self._transfer_functions[m]
+            ls, suffix = self._METHOD_LINESTYLES[m]
+
+            # Filter to requested pairs if specified
+            if channel_pairs is not None:
+                tf_lookup = {
+                    (d['channel_output'], d['channel_input']): d
+                    for d in tf_list
+                }
+                pairs_to_plot = [tf_lookup[(p[0], p[1])] for p in channel_pairs]
+            else:
+                pairs_to_plot = list(tf_list)
+
+            # Plot phase for each pair
+            for i, tf_dict in enumerate(pairs_to_plot):
+                ch_out = tf_dict['channel_output']
+                ch_in = tf_dict['channel_input']
+                freqs = tf_dict['freqs']
+                tf_complex = tf_dict['transfer_function']
+                color = prop_cycle_colors[(color_index + i) % len(prop_cycle_colors)]
+
+                # Extract phase in degrees
+                phase_deg = np.angle(tf_complex, deg=True)
+
+                ax.semilogx(
+                    freqs,
+                    phase_deg,
+                    marker="o",
+                    markersize=0,
+                    linestyle=ls,
+                    label=f"{ch_out} / {ch_in}{suffix if show_suffix else ''}",
+                    color=color,
+                    alpha=0.7,
+                )
+
+            # Keep same color mapping across methods in overlay mode
+            if not show_suffix:
+                color_index = color_index + len(pairs_to_plot)
+
+        ax.set_xlabel("Frequency (Hz)")
+        ax.set_ylabel("Phase (degrees)")
+        ax.set_ylim(-180, 180)
+        ax.axhline(y=0, color='gray', linewidth=0.5, linestyle='-')
+        ax.grid(True, which="both", ls=":")
+        ax.legend()
+
+        return fig, ax
+
+    def plot_psd(self, channels=None, figsize=(14, 6), show_variance=True):
         """
         Plot the ASD for one or more channels with 1-sigma uncertainty bands and the
         intrinsic accelerometer noise floor.
@@ -384,6 +1296,9 @@ class Vibration_Analyzer(Analyzer):
             If None, all currently cached channels are plotted.
         figsize : tuple of (float, float), optional
             Figure size passed to plt.subplots. Default: (14, 6).
+        show_variance : bool, optional
+            If True, draw the ±1-sigma uncertainty band around each
+            channel's PSD. Default: True.
 
         Returns
         -------
@@ -398,9 +1313,14 @@ class Vibration_Analyzer(Analyzer):
                 )
             channels = self._channels
 
-        # Ensure PSDs are available for every requested channel; recompute if any are missing
+        # Ensure PSDs are available for every requested channel
         missing = [ch for ch in channels if self._channels is None or ch not in self._channels]
         if missing:
+            if self._data_source == 'raw_noise':
+                raise ValueError(
+                    f"Channels {missing} were not included in from_raw_noise(). "
+                    "Cannot compute additional PSDs from raw noise after construction."
+                )
             self.get_psd(channels=channels)
 
         freqs    = self._freqs
@@ -432,20 +1352,22 @@ class Vibration_Analyzer(Analyzer):
                 alpha=0.5,
             )
 
-            # Build 1-sigma bounds; keep lower bound positive for log-scale plotting
-            lower = np.maximum(amp - sigma, np.finfo(float).tiny)
-            upper = amp + sigma
+            # Optionally draw the ±1-sigma uncertainty band
+            if show_variance:
+                # Build 1-sigma bounds; keep lower bound positive for log-scale plotting
+                lower = np.maximum(amp - sigma, np.finfo(float).tiny)
+                upper = amp + sigma
 
-            # Draw uncertainty band
-            ax.fill_between(
-                freqs,
-                lower,
-                upper,
-                color=color,
-                alpha=0.2,
-                linewidth=1,
-                label="±σ/√n",
-            )
+                # Draw uncertainty band
+                ax.fill_between(
+                    freqs,
+                    lower,
+                    upper,
+                    color=color,
+                    alpha=0.2,
+                    linewidth=1,
+                    label="±σ/√n",
+                )
 
         # Plot intrinsic noise floor as piecewise-constant horizontal segments
         for k in range(len(self._NOISE_FLOOR_FREQS_HZ)):
