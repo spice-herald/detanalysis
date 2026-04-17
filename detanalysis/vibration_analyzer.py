@@ -3,6 +3,8 @@ vibration_analyzer.py
 Inherits detanalysis.Analyzer with vibration-specific PSD and transfer function methods.
 """
 
+import warnings
+
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
@@ -75,7 +77,8 @@ class Vibration_Analyzer(Analyzer):
     @classmethod
     def from_raw_noise(cls, raw_path, channels, channel_pairs=None,
                        accel_gain=100.0, downsample_factor=1,
-                       series=None, verbose=True):
+                       series=None, trace_length_samples=None,
+                       trace_length_msec=None, verbose=True):
         """
         Construct a Vibration_Analyzer from raw continuous noise HDF5 data.
 
@@ -99,6 +102,27 @@ class Vibration_Analyzer(Analyzer):
             Process every Nth event (1 = all events). Default: 1.
         series : str or list, optional
             Filter files by series name. Default: all files in raw_path.
+        trace_length_samples : int, optional
+            Desired trace length, in samples, for PSD computation. If None
+            (default), the native per-event sample count stored in the raw
+            HDF5 files is used (original behavior).
+
+            If set, the samples from every (downsampled) event are
+            concatenated along the time axis into a single continuous
+            per-channel stream, and that stream is re-chopped into
+            non-overlapping chunks of exactly ``trace_length_samples``.
+            Any incomplete remainder at the end of the stream (shorter
+            than one full chunk) is discarded.
+
+            The resulting PSD has frequency resolution
+            ``sample_rate / trace_length_samples``. Must be a positive
+            integer >= 2. Mutually exclusive with ``trace_length_msec``.
+        trace_length_msec : float, optional
+            Same behavior as ``trace_length_samples``, but specified in
+            milliseconds. Converted to samples via
+            ``round(sample_rate * trace_length_msec / 1000)`` using the
+            sample rate read from the raw HDF5 metadata. Mutually exclusive
+            with ``trace_length_samples``.
         verbose : bool, optional
             Print progress information. Default: True.
 
@@ -107,6 +131,34 @@ class Vibration_Analyzer(Analyzer):
         Vibration_Analyzer
             Instance with cached PSDs and (optionally) transfer functions.
         """
+        # trace_length_samples and trace_length_msec are two ways of specifying
+        # the same quantity; exactly one (or neither) may be provided.
+        if (trace_length_samples is not None) and (trace_length_msec is not None):
+            raise ValueError(
+                "trace_length_samples and trace_length_msec are mutually exclusive; "
+                "pass at most one."
+            )
+
+        # Validate trace_length_samples (trace_length_msec is validated and
+        # converted to samples below, once sample_rate is available).
+        if trace_length_samples is not None:
+            if (not isinstance(trace_length_samples, (int, np.integer))) or (trace_length_samples < 2):
+                raise ValueError(
+                    "trace_length_samples must be a positive integer >= 2; "
+                    f"got {trace_length_samples!r}."
+                )
+            trace_length_samples = int(trace_length_samples)
+
+        # Validate trace_length_msec (must be a positive finite number)
+        if trace_length_msec is not None:
+            if (not isinstance(trace_length_msec, (int, float, np.integer, np.floating))
+                    or (not np.isfinite(trace_length_msec)) or (trace_length_msec <= 0)):
+                raise ValueError(
+                    "trace_length_msec must be a positive finite number; "
+                    f"got {trace_length_msec!r}."
+                )
+            trace_length_msec = float(trace_length_msec)
+
         # Normalize channel_pairs format
         if channel_pairs is not None and channel_pairs and isinstance(channel_pairs[0], str):
             channel_pairs = [channel_pairs]
@@ -140,6 +192,27 @@ class Vibration_Analyzer(Analyzer):
         )
         total_events = int(total_events)
 
+        # Convert trace_length_msec to samples now that sample_rate is known.
+        # n_samples = round(fs * T_msec / 1000)
+        if trace_length_msec is not None:
+            trace_length_samples = int(round(sample_rate * trace_length_msec / 1000.0))
+            if trace_length_samples < 2:
+                raise ValueError(
+                    f"trace_length_msec={trace_length_msec} ms corresponds to "
+                    f"{trace_length_samples} samples at fs={sample_rate} Hz; "
+                    "need at least 2 samples for a meaningful FFT."
+                )
+
+        # FFT performance is best on powers of two; warn if the user picks otherwise.
+        # A positive integer N is a power of two iff log2(N) is an integer.
+        if trace_length_samples is not None:
+            log2_len = np.log2(trace_length_samples)
+            if log2_len != int(log2_len):
+                warnings.warn(
+                    f"trace_length_samples={trace_length_samples} is not a power of two; "
+                    "FFT performance may be suboptimal."
+                )
+
         # Set up H5Reader for event streaming
         h5reader = h5io.H5Reader()
         h5reader.set_files(raw_path, series=series)
@@ -159,60 +232,51 @@ class Vibration_Analyzer(Analyzer):
             sum_cross = {}
             sum_auto = {}
 
+        # Counts the number of traces (one per event in the default path,
+        # one per produced chunk when rechunking) folded into the PSD estimate.
         n_events_processed = 0
         event_index = 0
 
-        # Event loop: read raw traces and accumulate PSD statistics
-        pbar = tqdm(
-            total=total_events,
-            desc="Processing raw noise events",
-            disable=(not verbose),
-        )
+        # Rolling per-channel buffer used only when trace_length_samples is set
+        rechunk_buffer = None
+        freqs = None  # set on the first processed trace
 
-        while True:
-            # Read next event from the raw HDF5 files
-            event_trace, metadata = h5reader.read_next_event(
-                detector_chans=channels,
-                adctoamp=True,
-                include_metadata=True,
-            )
+        def _process_one_trace(trace_2d):
+            """
+            Fold a single (n_channels, n_samples) trace into the running PSD
+            estimate and cross-correlation accumulators.
 
-            # End-of-data check
-            if event_trace.size == 0:
-                break
+            On the first invocation, lazily initializes welford_mean / welford_m2 /
+            freqs / cross-correlation accumulators based on the incoming n_samples.
+            """
+            nonlocal welford_mean, welford_m2, freqs, n_events_processed
 
-            pbar.update(1)
-            event_index = event_index + 1
+            # Number of samples in this trace (may differ from native event length
+            # when rechunking is enabled)
+            n_samples = trace_2d.shape[-1]
 
-            # Downsample: skip events that don't match the stride
-            if event_index % downsample_factor != 0:
-                continue
-
-            n_events_processed = n_events_processed + 1
-
-            # Convert ADC amplitude to g
-            # trace shape: (n_channels, n_samples)
-            traces = event_trace * (1.0 / accel_gain)
-            n_samples = traces.shape[-1]
-
-            # Frequency array (only computed once)
+            # First-trace initialization: frequency axis, Welford accumulators,
+            # and (optionally) cross-correlation accumulators
             if welford_mean is None:
-                n_freqs = n_samples // 2 + 1
+                n_freqs_local = n_samples // 2 + 1
                 freqs = np.fft.rfftfreq(n_samples, d=1.0 / sample_rate)
-                welford_mean = np.zeros((n_channels, n_freqs))
-                welford_m2 = np.zeros((n_channels, n_freqs))
+                welford_mean = np.zeros((n_channels, n_freqs_local))
+                welford_m2 = np.zeros((n_channels, n_freqs_local))
 
-                # Initialize cross-correlation accumulators
                 if channel_pairs is not None:
                     for pair in channel_pairs:
                         key = (pair[0], pair[1])
-                        sum_cross[key] = np.zeros(n_freqs, dtype=complex)
-                        sum_auto[key] = np.zeros(n_freqs)
+                        sum_cross[key] = np.zeros(n_freqs_local, dtype=complex)
+                        sum_auto[key] = np.zeros(n_freqs_local)
+
+            # Bump trace counter (used by Welford running mean/variance below)
+            n_events_processed = n_events_processed + 1
 
             # Compute FFT and one-sided PSD for each channel
             fft_vals_dict = {}  # cache FFTs for cross-correlation computation
+            # Loop over each detector channel and update its running PSD estimate
             for ch_idx in range(n_channels):
-                trace = traces[ch_idx, :]
+                trace = trace_2d[ch_idx, :]
 
                 # FFT of the trace
                 fft_vals = np.fft.rfft(trace)
@@ -235,6 +299,7 @@ class Vibration_Analyzer(Analyzer):
 
             # Cross-correlation accumulation for each channel pair
             if channel_pairs is not None:
+                # Loop over each (output, input) channel pair
                 for pair in channel_pairs:
                     ch_out, ch_in = pair[0], pair[1]
                     fft_out = fft_vals_dict[ch_out]
@@ -247,7 +312,68 @@ class Vibration_Analyzer(Analyzer):
                     # Accumulate auto-spectrum of input: |fft_in|^2
                     sum_auto[key] = sum_auto[key] + np.abs(fft_in) ** 2
 
+        # Event loop: read raw traces and accumulate PSD statistics
+        pbar = tqdm(
+            total=total_events,
+            desc="Processing raw noise events",
+            disable=(not verbose),
+        )
+
+        # Iterate over every event in the raw HDF5 stream until exhausted
+        while True:
+            # Read next event from the raw HDF5 files
+            event_trace, metadata = h5reader.read_next_event(
+                detector_chans=channels,
+                adctoamp=True,
+                include_metadata=True,
+            )
+
+            # End-of-data check
+            if event_trace.size == 0:
+                break
+
+            pbar.update(1)
+            event_index = event_index + 1
+
+            # Downsample: skip events that don't match the stride
+            if event_index % downsample_factor != 0:
+                continue
+
+            # Convert ADC amplitude to g (event shape: (n_channels, n_samples))
+            event_g = event_trace * (1.0 / accel_gain)
+
+            if trace_length_samples is None:
+                # Default path: treat each event as one trace (original behavior)
+                _process_one_trace(event_g)
+            else:
+                # Rechunk path: concatenate this event onto the rolling buffer
+                # and emit as many full chunks of length trace_length_samples as
+                # the accumulated buffer allows. Any remainder stays in the
+                # buffer for the next event.
+                if rechunk_buffer is None:
+                    rechunk_buffer = event_g
+                else:
+                    rechunk_buffer = np.concatenate(
+                        (rechunk_buffer, event_g), axis=1,
+                    )
+
+                # Emit every complete chunk currently held in the buffer
+                while rechunk_buffer.shape[-1] >= trace_length_samples:
+                    chunk = rechunk_buffer[:, :trace_length_samples]
+                    _process_one_trace(chunk)
+                    rechunk_buffer = rechunk_buffer[:, trace_length_samples:]
+
         pbar.close()
+
+        # Any samples left in rechunk_buffer form an incomplete trailing trace
+        # and are intentionally discarded (per the rechunk semantics).
+        if verbose and trace_length_samples is not None:
+            leftover = 0 if rechunk_buffer is None else rechunk_buffer.shape[-1]
+            print(
+                f"Rechunked into {n_events_processed} trace(s) of "
+                f"{trace_length_samples} samples "
+                f"({leftover} trailing sample(s) discarded)."
+            )
 
         if n_events_processed < 2:
             raise RuntimeError(
