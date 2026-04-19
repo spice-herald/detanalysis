@@ -507,10 +507,9 @@ class PhotonCalibration:
                 ax.set_ylim(1e-1, 1.25*max(spectrum_vals))
                 ax.set_yscale('log')
             ax.legend()
-            ax.xlabel(amp_rq)
-            ax.ylabel("Counts Per Bin")
+            ax.set_xlabel(amp_rq)
+            ax.set_ylabel("Counts Per Bin")
 
-            return fig, ax            
         
         def _resid(params):
             modeled_vals = self._model_spectrum(spectrum_bin_centers, 
