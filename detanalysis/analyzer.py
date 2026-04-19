@@ -958,17 +958,20 @@ class Analyzer:
             print("WARNING: No events found!")
             return None
 
+        # limit the number of events
+        if  nb_random_samples is None:
+            nb_random_samples = nb_events_limit
+
+        
         if nb_random_samples is not None and nb_random_samples < len(df_used):
             df_used = df_used.sample(n=nb_random_samples)
 
         nb_events = len(df_used)
 
-        if nb_events > nb_events_limit:
-            raise ValueError(
-                f"ERROR: Number of events limited to {nb_events_limit}. "
-                f"Found {nb_events} traces! Change nb_events_limit if needed!"
-            )
-
+        if nb_events > nb_random_samples:
+            print(f'WARNING: Number of events is limited to {nb_events_limit}. Change limit '
+                  f'or use  "nb_random_samples" if needed')
+            
         if "eventnumber" in self._feature_names:
             series_nums = df_used.seriesnumber.values
             event_nums = df_used.eventnumber.values

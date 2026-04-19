@@ -89,7 +89,9 @@ class PhotonCalibration:
         self.photon_energy_ev = photon_energy_ev
         self.photon_energy_j = self.photon_energy_ev * 1.602e-19
         self.analyzer_object = analyzer_object
-        self.calibration_df = analyzer_object.df
+        # Work in the analyzer master dataframe so cut masks are full-length
+        # and can be safely registered back onto the analyzer.
+        self.calibration_df = analyzer_object.df_full
         self.channel_name = channel_name
         self.fs = fs
         self.filterfile_path = filterfile_path
@@ -750,95 +752,91 @@ class PhotonCalibration:
 
             
         
-    def define_photon_cut(self, peak_number, width_sigma, cut_name, 
+    def define_photon_cut(self, peak_number, width_sigma, cut_name,
                           cut_rq=None,
-                          lgc_plot=True, lgc_ylog=False, 
-                          lgc_diagnostics=False):
+                          lgc_plot=True, lgc_ylog=False,
+                          lgc_diagnostics=False,
+                          overwrite=True):
         """
-        Defines a region to accept events from for later pulse shape analysis,
-        and creates a cut using Semiautocuts to use to pull events from later.
-        Must be run after the peaks are fit using fit_spectrum.
-        
-        Parameters
-        ----------
-        peak_number : int
-            The number of the peak to select events from. Numbered starting
-            from zero, i.e. the peak associated with zero photons is number
-            zero, the peak associated with one photon is one, etc.
-            
-        width_sigma : float
-            The width of the region around the peak center to select events
-            from. Plus or minus this width, in units of sigma.
-            
-        cut_name : string
-            The name of the cut to create using Semiautocuts, e.g.
-            'cut_1p_Melange1pc1ch'
-            
-        cut_rq : string, optional
-            If not None, overrides the automatically created cut RQ.
-            
-        lgc_plot : bool, optional
-            If True, displays plots showing the regions selected.
-            
-        lgc_ylog : bool, optional
-            If True, sets the y scale of the diagnostic plot(s) to log scale.
-            
-        lgc_diagnostics : bool, optional
-            Prints out diagnostic messages if True.
+        Define and register a cut around one fitted photon peak.
 
+        The cut is computed with ``Semiautocut`` on a copy of the calibration
+        dataframe so any temporary columns created internally stay off the
+        analyzer dataframe. The resulting full-length boolean mask is then
+        registered onto the analyzer using ``Analyzer.register_cut``.
         """
-        
-        #define the center position of the peak to select
+
         if peak_number > self.npeaks_model - 1:
-            raise ValueError(f'Only {self.npeaks_model} were modelled; choose an appropriate peak number')
+            raise ValueError(
+                f'Only {self.npeaks_model} peaks were modeled; choose an appropriate peak number.'
+            )
+
         if self.eqspacing_model:
             peak_center = self.photon_fit_popt[0] * peak_number
             peak_width = self.photon_fit_popt[1 + peak_number]
         else:
             peak_center = self.photon_fit_popt[peak_number]
             peak_width = self.photon_fit_popt[peak_number + self.npeaks_model]
-        
+
         cut_width = peak_width * width_sigma
         if lgc_diagnostics:
-            print("Peak center: " + str(peak_center))
-            print("Width to cut: " + str(cut_width))
+            print(f"Peak center: {peak_center}")
+            print(f"Width to cut: {cut_width}")
             print(" ")
-        
-        cut_name_mod = cut_name[:-(len(self.channel_name) + 1)]
-        if lgc_diagnostics:
-            print("Modified cut name: " + str(cut_name_mod))
-            print(" ")
-            
+
         if lgc_plot:
             event_heights = self.calibration_df[self.calibration_df[self.cut_rq]][self.amp_rq].values
             spectrum_vals, spectrum_bins = np.histogram(event_heights, self.spectrum_bins)
             spectrum_bins = spectrum_bins[:-1]
-            
+
             plt.title("Selection Around Peak")
             plt.step(spectrum_bins, spectrum_vals, label='Values')
-            plt.vlines([peak_center - cut_width, peak_center + cut_width],
-                      0.5, 1.25*max(spectrum_vals), color = 'C1', label = "Selection Range")
+            plt.vlines(
+                [peak_center - cut_width, peak_center + cut_width],
+                0.5,
+                1.25 * max(spectrum_vals),
+                color='C1',
+                label="Selection Range",
+            )
             if lgc_ylog:
-                plt.ylim(1e-1, 1.25*max(spectrum_vals))
+                plt.ylim(1e-1, 1.25 * max(spectrum_vals))
                 plt.yscale('log')
             plt.legend()
             plt.xlabel(self.amp_rq)
             plt.ylabel("Counts Per Bin")
             plt.show()
+
+        cut_pars = {
+            'val_lower': peak_center - cut_width,
+            'val_upper': peak_center + cut_width,
+        }
+
+        # Work on a copy so any internal helper columns remain local.
+        calibration_df_copy = self.calibration_df.copy()
+        cut_rq_name = self.amp_rq if cut_rq is None else cut_rq
+        photon_cut = da.Semiautocut(
+            calibration_df_copy,
+            cut_rq=cut_rq_name,
+            channel_name=self.channel_name,
+            cut_pars=cut_pars,
+            cut_name=cut_name,
+            cut_rq_name_override=True,
+        )
         
-        cut_pars = {'val_lower': peak_center - cut_width, 'val_upper': peak_center + cut_width,}
-	
-        cut_rq_override_bool = (cut_rq is not None)
-        photon_cut = da.Semiautocut(self.calibration_df, cut_rq=self.amp_rq,
-                                   channel_name=self.channel_name,
-                                   cut_pars=cut_pars, cut_name=cut_name,
-                                   cut_rq_name_override=True)
-        _ = photon_cut.do_cut(lgcdiagnostics=lgc_diagnostics)
-        
-        if lgc_plot==True:
+        photon_cut_mask = photon_cut.do_cut(lgcdiagnostics=lgc_diagnostics)
+
+        # Persist the cut only through the analyzer interface.
+        self.analyzer_object.register_cut(
+            photon_cut_mask,
+            name=cut_name,
+            overwrite=overwrite,
+        )
+
+        if lgc_plot:
             photon_cut.plot_histograms()
-            
+
         self.photon_cut_dict[peak_number] = cut_name
+        
             
     def load_events(self, photon_peak_number, number_events_limit=1000,
                     pretrigger_window=None, trace_length=None,  
@@ -905,14 +903,13 @@ class PhotonCalibration:
         photon_cut_name = self.photon_cut_dict[photon_peak_number]
         if lgc_plot_example_events:
             print("Photon cut name: " + str(photon_cut_name))
-        cut_set = self.analyzer_object.df[self.cut_rq] & self.analyzer_object.df[photon_cut_name]
+        cut_set = f"({self.cut_rq}) & ({photon_cut_name})"
         
         traces, info = self.analyzer_object.get_traces(self.channel_name, 
                                                        raw_path=self.traces_raw_path,
                                                        trace_length_msec=trace_length*1e3,
                                                        pretrigger_length_msec=pretrigger_window*1e3,
                                                        nb_random_samples=number_events_limit,
-                                                       nb_events_check=False,
                                                        cut=cut_set)
         
         t_arr = np.arange(0, (len(traces[0][0]))/self.fs, 1/self.fs)
