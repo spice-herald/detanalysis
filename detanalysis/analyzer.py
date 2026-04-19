@@ -23,13 +23,6 @@ class Analyzer:
     """
     Analyze features (RQs) stored in HDF5 files using Vaex.
 
-    Architecture
-    ------------
-    _df_full : master dataframe with all rows and all persistent columns
-    _df      : current working dataframe (full dataframe or filtered view)
-
-    Cuts are stored as boolean columns on _df_full only.
-
     Supported cut inputs
     --------------------
     - None

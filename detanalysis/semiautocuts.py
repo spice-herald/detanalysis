@@ -24,84 +24,49 @@ h5 = h5io.H5Reader()
 def get_trace(df, index, path_to_data, lgcdiagnostics=False, 
               trace_length_msec=10, pretrigger_length_msec=5):
     """
-    Function to retrive a trace so it can be plotted
-    
+    Function to retrieve a trace so it can be plotted.
+
     Parameters
     ----------
-    
     df : vaex dataframe
-        The dataframe the trace is being retrived from
-    
+        The dataframe the trace is being retrieved from.
     index : int
-        The index (in the vaex dataframe) of the trace being retrived
-        
+        Row index in the current dataframe view.
     path_to_data : str
-        The path to the folder where the data is stored, e.g.
-        /sdata1/runs/run28/
-        
+        Path to the folder where the raw data is stored.
     lgcdiagnostics : bool, optional
-        If True, prints out diagnostic statements
-        
+        If True, prints diagnostic statements.
     trace_length_msec : float, optional
-        Total trace length, passed to read_many_events
-        
+        Total trace length, passed to read_many_events.
     pretrigger_length_msec : float, optional
-        Pretrigger length, passed to read_many_events
+        Pretrigger length, passed to read_many_events.
     """
-    #df.select(df.index == index)
-    
-    df['index'] = np.arange(0, len(df), 1)
-    df = df.sort(by='index')
-    
-    group_name = df[df.index == index].group_name.values[0]
-    event_number = df[df.index == index].event_number.values[0]
-    series_number = df[df.index == index].series_number.values[0]
-    dump_number = int(df[df.index == index].dump_number.values[0])
-    #series_number = int(df[df.index == index].series_number.values[0])
-    #event_index = int(df[df.index == index].event_index.values[0])
-    
-    #if df[df.index == index].trigger_type.values == 4.0:
-    #    random_truth = False
-    #if df[df.index == index].trigger_type.values == 3.0:
-    #    random_truth = True
-        
+    if index < 0 or index >= len(df):
+        raise IndexError(f"index {index} out of range for dataframe of length {len(df)}")
+
+    group_name = df.group_name.values[index]
+    event_number = int(df.event_number.values[index])
+    series_number = int(df.series_number.values[index])
+    dump_number = int(df.dump_number.values[index])
+
     if lgcdiagnostics:
         print("group_name: " + str(group_name))
         print("event_number: " + str(event_number))
         print("series_number: " + str(series_number))
         print("dump_number: " + str(dump_number))
-        #print("series_number: " + str(series_number))
-        #print("event_index: " + str(event_index))
-        #print("random_truth: " + str(random_truth))
-    
-    #if bool(random_truth):
-    #    event_prefix = '/rand_I2_D'
-    #else:
-    #    event_prefix = '/threshtrig_I2_D'
-    
-    #file_name = path_to_triggered_data + event_prefix + str(series_number)[1:-6]  + "_T" + str(series_number)[-6:] + "_F" + str(dump_number).zfill(4) + ".hdf5"
-    
-    event_list_ = {'series_number': series_number, 
-                    'event_number': event_number, 
-                    'group_name': group_name
-                    }
-                    
+
     event_nums_ = [int(dump_number * 100000 + event_number)]
     series_nums_ = [int(series_number)]
-                    
-    trace = h5.read_many_events(filepath=path_to_data, nevents=1, event_nums=event_nums_,
-                                series_nums=series_nums_, 
-                                trace_length_msec=trace_length_msec, 
-                                pretrigger_length_msec=pretrigger_length_msec)
-    
-    #if lgcdiagnostics:
-    #    print("File name: " + str(file_name))
-    
-    #trace = h5.read_single_event(event_index = event_index, file_name = file_name, adctoamp = True)
+
+    trace = h5.read_many_events(
+        filepath=path_to_data,
+        nevents=1,
+        event_nums=event_nums_,
+        series_nums=series_nums_,
+        trace_length_msec=trace_length_msec,
+        pretrigger_length_msec=pretrigger_length_msec,
+    )
     return np.asarray(trace)
-    
-
-
 
 
 class Semiautocut:
@@ -222,7 +187,7 @@ class Semiautocut:
            
         """
 
-        self.df = vaex_dataframe
+        self.df = vaex_dataframe.copy()
         self.cut_rq_base = cut_rq
         self.channel_name = channel_name
         self.cut_pars = cut_pars
@@ -254,7 +219,7 @@ class Semiautocut:
             self.chi2_rq = str('lowchi2_of1x1_nodelay_' + self.channel_name)
         
         
-        if self.cut_rq_base is ('event_time'): #this means we're doing a time cut
+        if self.cut_rq_base == 'event_time': #this means we're doing a time cut
             self.cut_rq = self.cut_rq_base #don't include channel name in full cut rq name
         elif cut_rq_name_override:
             self.cut_rq = self.cut_rq_base #overrides the renaming convention
@@ -271,8 +236,6 @@ class Semiautocut:
             self.cut_name = str('cut_' + self.cut_rq)
             if self.lgc_diagnostics:
                 print("Cut name: " + str(self.cut_name))
-        self.df[self.cut_name] = np.ones(len(self.df), dtype = 'bool')
-
                 
         if (self.time_bins is not None) and (self.ofamp_bins is not None):
             raise Exception('You must do either a binned in time or in ofamp cut, not both')
@@ -418,55 +381,80 @@ class Semiautocut:
                 print(cut_dict['exceptions_dict'])
         
         
+    def _get_previous_cut_names(self, include_previous_cuts=False):
+        """
+        Resolve which previous cut columns should be used to define the sample
+        from which automatic cut thresholds are estimated.
+        """
+        cut_names = []
+        if include_previous_cuts is True:
+            column_names = self.df.get_column_names()
+            for name in column_names:
+                if name.startswith('cut_') and (self.channel_name in name):
+                    cut_names.append(name)
+        elif isinstance(include_previous_cuts, list):
+            cut_names = copy(include_previous_cuts)
+        return cut_names
+
+    def _combine_cut_columns(self, cut_names):
+        """Return combined boolean mask from a list of cut column names."""
+        if not cut_names:
+            return np.ones(len(self.df), dtype=bool)
+
+        mask = np.ones(len(self.df), dtype=bool)
+        for name in cut_names:
+            if name not in self.df.get_column_names():
+                raise KeyError(f'Cut column "{name}" not found in dataframe')
+            mask &= np.asarray(self.df[name].values).astype(bool)
+        return mask
+
     def do_cut(self, lgcdiagnostics=False, include_previous_cuts=False):
         """
         Performs cuts set up during initialization.
-        
+
         Parameters
         ----------
-        
         lgcdiagnostics : bool, optional
-            If True, prints diagnostic statements
-            
-        include_previous_cuts : bool or array, optional
-            Option to generate the automatic cut values from events that pass
-            previous rounds of cuts (i.e. cutting in ofamp vs. chi2 space, 
-            generating cut levels only from the distributiuon of events that
-            pass baseline and slope cuts). If True, uses all RQs in the dataframe
-            starting with 'cut_' and including the channel name. If an array of
-            names, uses those cut RQ names.
-        
+            If True, prints diagnostic statements.
+        include_previous_cuts : bool or list, optional
+            Control for which previous cut columns define the sample used to
+            estimate automatic cut thresholds.
+
         Returns
         -------
-        
-        mask: array of booleans that can be used
-            to construct a cut RQ by specifying for
-            example df['cSlope'] = slope_cut_arr
+        mask : numpy.ndarray
+            Boolean mask for this cut.
         """
-            
         if lgcdiagnostics:
             print("include_previous_cuts: " + str(include_previous_cuts))
             print(" ")
-            
+
         if 'time_arr' in self.cut_pars:
             self._do_time_cut(lgcdiagnostics=lgcdiagnostics)
         elif (self.time_bins is None) and (self.ofamp_bins is None):
-            self._do_simple_cut(lgcdiagnostics=lgcdiagnostics,
-                                include_previous_cuts=include_previous_cuts)
+            self._do_simple_cut(
+                lgcdiagnostics=lgcdiagnostics,
+                include_previous_cuts=include_previous_cuts,
+            )
         elif self.time_bins_arr is not None:
             if any([x in self.cut_pars for x in ['time_arr_num', 'time_arr_percent', 'time_arr_sigma']]):
-                self._do_time_binned_count_cut(lgcdiagnostics=lgcdiagnostics,
-                                               include_previous_cuts=include_previous_cuts)
+                self._do_time_binned_count_cut(
+                    lgcdiagnostics=lgcdiagnostics,
+                    include_previous_cuts=include_previous_cuts,
+                )
             else:
-                self._do_time_binned_cut(lgcdiagnostics=lgcdiagnostics,
-                                        include_previous_cuts=include_previous_cuts)
+                self._do_time_binned_cut(
+                    lgcdiagnostics=lgcdiagnostics,
+                    include_previous_cuts=include_previous_cuts,
+                )
         elif self.ofamp_bins_arr is not None:
-            self._do_ofamp_binned_cut(lgcdiagnostics=lgcdiagnostics,
-                                      include_previous_cuts=include_previous_cuts)
-            
-        #this doesn't stick around, but makes plotting easier (or maybe does?)
-        self.df[self.cut_name] = self.mask 
-            
+            self._do_ofamp_binned_cut(
+                lgcdiagnostics=lgcdiagnostics,
+                include_previous_cuts=include_previous_cuts,
+            )
+
+        # Persist only the final cut column for plotting / downstream use.
+        self.df[self.cut_name] = self.mask
         return self.mask
                
                 
@@ -505,249 +493,156 @@ class Semiautocut:
                       on_cut_bin=0):
         """
         Gets a boolean mask of a simple cut being done in a single bin.
-        Defaults to no ofamp or time limits and using the global cut
-        cut_pars dictionary if no limits or override cut_pars dict is
-        passed.
-        
-        Parameters
-        ----------
-        
-        ofamp_lims : array
-            Array of the limits in ofamp where the cut will be performed,
-            formated as [lim_low, lim_high].
-            
-        time_lims : array
-            Array of the limits in time where the cut will be performed,
-            formated as [lim_low, lim_high]
-            
-        lgcdiagnostics : bool, optional
-            If True, prints out diagnostic statements
-            
-        include_previous_cuts : bool or array, optional
-            Option to generate the automatic cut values from events that pass
-            previous rounds of cuts (i.e. cutting in ofamp vs. chi2 space, 
-            generating cut levels only from the distributiuon of events that
-            pass baseline and slope cuts). If True, uses all RQs in the dataframe
-            starting with 'cut_' and including the channel name. If an array of
-            names, uses those cut RQ names.
-            
-        on_cut_bin : int, optional
-            Used to track which cut bin we're on, and which index to save cut
-            values to.
-                
-        Returns
-        -------
-            
-        overall_mask : array
-            Array that's a mask for the cut (i.e. failing cut is False,
-            passing cut is True). Values outside the time of ofamp limits
-            will be false, so that the mask from this function can be
-            combined with the mask from other functions with a bitwise or
-            and a global cut mask can be constructed.
+        Previous cuts are used only to define the sample from which automatic
+        thresholds are estimated; they are not applied to the returned mask.
         """
-            
         if lgcdiagnostics:
             print(" ")
             print("include_previous_cuts: " + str(include_previous_cuts))
-            
+
         if cut_pars is None:
             cut_pars = self.cut_pars
             if lgcdiagnostics:
                 print("Using default cut parameters")
-                
+
         if ofamp_lims is not None:
-            lims_mask_low = self.df[self.ofamp_rq].values > ofamp_lims[0]
-            lims_mask_high = self.df[self.ofamp_rq].values < ofamp_lims[1]
-            
-            lims_mask = lims_mask_low & lims_mask_high
-            
+            lims_mask = (
+                (self.df[self.ofamp_rq].values > ofamp_lims[0])
+                & (self.df[self.ofamp_rq].values < ofamp_lims[1])
+            )
             if lgcdiagnostics:
                 print("Binning by OFAmp, " + str(ofamp_lims))
         elif time_lims is not None:
-            lims_mask_low = self.df.event_time.values > time_lims[0]
-            lims_mask_high = self.df.event_time.values < time_lims[1]
-            
-            lims_mask = lims_mask_low & lims_mask_high
-            
+            lims_mask = (
+                (self.df.event_time.values > time_lims[0])
+                & (self.df.event_time.values < time_lims[1])
+            )
             if lgcdiagnostics:
                 print("Binning by time, " + str(time_lims))
         else:
-            lims_mask = np.ones(len(self.df), dtype='bool')
-        
-        cut_names = []        
-        if include_previous_cuts is True:
-            column_names = self.df.get_column_names()
-            
-            i = 0
-            while i < len(column_names):
-                if ("cut_" in column_names[i]) and (self.channel_name in column_names[i]):
-                    cut_names.append(column_names[i])
-                i += 1
-        elif isinstance(include_previous_cuts, list):
-            cut_names = copy(include_previous_cuts)
-        else:
-            cut_names = []
-        
-        
-            
-        self.df['_lims_mask'] = lims_mask
-        cut_names.append('_lims_mask')
+            lims_mask = np.ones(len(self.df), dtype=bool)
 
-        #reset selection 
-        self.df['_trues'] = np.ones(len(self.df), dtype = 'bool')
-        self.df.select('_trues', mode='replace')
+        prev_cut_names = self._get_previous_cut_names(
+            include_previous_cuts=include_previous_cuts,
+        )
+        base_mask = lims_mask & self._combine_cut_columns(prev_cut_names)
 
-        #select the cuts in cut_names
-        i = 0
-        while i < len(cut_names):
-            self.df.select(cut_names[i], mode='and')
-            i += 1
-            
         if lgcdiagnostics:
-            print("Selection list: " + str(cut_names))
+            print("Previous cut list: " + str(prev_cut_names))
             print("Cut parameters: " + str(cut_pars))
-            
-        #check that the cut_pars dict has logical keys
+            print("Number of events passing base mask: " + str(int(np.count_nonzero(base_mask))))
+
         if 'time_arr' in self.cut_pars:
             raise Exception("Can't do simple cut with a time based cut")
-            
-        #if there are no datapoints in the array, return an array of all false
-        if lgcdiagnostics:
-            print("Number of events passing selection: " + str(sum(self.df.evaluate('_trues', selection=True))))
-        if sum(self.df.evaluate('_trues', selection=True)) == 0:
-            return np.zeros(len(self.df), dtype = 'bool')
-            
-        #value based cuts
-        if ('val_upper' in cut_pars):
-            self.values_upper[on_cut_bin] = cut_pars['val_upper']
+
+        if np.count_nonzero(base_mask) == 0:
+            return np.zeros(len(self.df), dtype=bool)
+
+        rq_values_all = np.asarray(self.df[self.cut_rq].values)
+        values = rq_values_all[base_mask]
+
+        value_lower = None
+        value_upper = None
+
+        # value based cuts
+        if 'val_upper' in cut_pars:
             value_upper = cut_pars['val_upper']
-            
-            if ('val_lower' in cut_pars):
-                bool_arr_lower = self.df[self.cut_rq].values > cut_pars['val_lower']
-                bool_arr_upper = self.df[self.cut_rq].values < cut_pars['val_upper']
-                
-                self.values_lower[on_cut_bin] = cut_pars['val_lower']
-                value_lower = cut_pars['val_lower']
-                
-                cut_mask = bool_arr_lower & bool_arr_upper
-                
-            else:
-                cut_mask = self.df[self.cut_rq].values < cut_pars['val_upper']
-                
-        elif ('val_lower' in self.cut_pars):
-            self.values_lower[on_cut_bin-1] = self.cut_pars['val_lower']
-            value_lower = self.cut_pars['val_lower']
-            cut_mask = self.df[self.cut_rq].values > self.cut_pars['val_lower']
-                
-                
-        #percentile based cuts
-        elif ('percent_upper' in cut_pars):
-            # values = self.df[self.cut_rq].values
-            values = self.df.evaluate(self.cut_rq, selection = True)
-            value_upper = np.percentile(values, cut_pars['percent_upper']*100)
             self.values_upper[on_cut_bin] = value_upper
-            if ('percent_lower' in cut_pars):
-                value_lower = np.percentile(values, cut_pars['percent_lower']*100)
-                    
-                bool_arr_lower = self.df[self.cut_rq].values > value_lower
-                bool_arr_upper = self.df[self.cut_rq].values < value_upper
-                
+            if 'val_lower' in cut_pars:
+                value_lower = cut_pars['val_lower']
                 self.values_lower[on_cut_bin] = value_lower
-                
-                cut_mask = bool_arr_lower & bool_arr_upper
+                cut_mask = (rq_values_all > value_lower) & (rq_values_all < value_upper)
             else:
-                cut_mask = self.df[self.cut_rq].values < value_upper
-        elif ('percent_lower' in cut_pars):
-            values = self.df.evaluate(self.cut_rq, selection = True)
-            value_lower = np.percentile(values, cut_pars['percent_lower']*100)
+                cut_mask = rq_values_all < value_upper
+
+        elif 'val_lower' in cut_pars:
+            value_lower = cut_pars['val_lower']
             self.values_lower[on_cut_bin] = value_lower
-            cut_mask = self.df[self.cut_rq].values > value_lower
-        elif ('percent' in cut_pars):
+            cut_mask = rq_values_all > value_lower
+
+        # percentile based cuts
+        elif 'percent_upper' in cut_pars:
+            value_upper = np.percentile(values, cut_pars['percent_upper'] * 100)
+            self.values_upper[on_cut_bin] = value_upper
+            if 'percent_lower' in cut_pars:
+                value_lower = np.percentile(values, cut_pars['percent_lower'] * 100)
+                self.values_lower[on_cut_bin] = value_lower
+                cut_mask = (rq_values_all > value_lower) & (rq_values_all < value_upper)
+            else:
+                cut_mask = rq_values_all < value_upper
+
+        elif 'percent_lower' in cut_pars:
+            value_lower = np.percentile(values, cut_pars['percent_lower'] * 100)
+            self.values_lower[on_cut_bin] = value_lower
+            cut_mask = rq_values_all > value_lower
+
+        elif 'percent' in cut_pars:
             percent_lower = 0.5 - 0.5 * cut_pars['percent']
             percent_upper = 0.5 + 0.5 * cut_pars['percent']
-            
-            values = self.df.evaluate(self.cut_rq, selection = True)
-            value_lower = np.percentile(values, percent_lower*100)
-            value_upper = np.percentile(values, percent_upper*100)
-            
+            value_lower = np.percentile(values, percent_lower * 100)
+            value_upper = np.percentile(values, percent_upper * 100)
             self.values_lower[on_cut_bin] = value_lower
             self.values_upper[on_cut_bin] = value_upper
-            
-            bool_arr_lower = self.df[self.cut_rq].values > value_lower
-            bool_arr_upper = self.df[self.cut_rq].values < value_upper
-            
-            cut_mask = bool_arr_lower & bool_arr_upper
-           
-        
-        #sigma based cuts
-        elif ('sigma_upper' in cut_pars):
-            #for sigma calculations, if we need them
-            values = self.df.evaluate(self.cut_rq, selection = True)
+            cut_mask = (rq_values_all > value_lower) & (rq_values_all < value_upper)
+
+        # sigma based cuts
+        elif 'sigma_upper' in cut_pars:
             median = np.percentile(values, 50)
-            sigma = np.mean([np.percentile(values, 50 - 68.27/2.0) - median, 
-                            median - np.percentile(values, 50 + 68.27/2.0)])
+            sigma = np.mean([
+                np.percentile(values, 50 - 68.27 / 2.0) - median,
+                median - np.percentile(values, 50 + 68.27 / 2.0),
+            ])
             sigma = np.abs(sigma)
-            
-            value_upper = median + sigma * self.cut_pars['sigma_upper']
+            value_upper = median + sigma * cut_pars['sigma_upper']
             self.values_upper[on_cut_bin] = value_upper
-                
-            if ('sigma_lower' in cut_pars):
+            if 'sigma_lower' in cut_pars:
                 value_lower = median - sigma * cut_pars['sigma_lower']
                 self.values_lower[on_cut_bin] = value_lower
-                
-                bool_arr_lower = self.df[self.cut_rq].values > value_lower
-                bool_arr_upper = self.df[self.cut_rq].values < value_upper
-                
-                cut_mask = bool_arr_lower & bool_arr_upper
-                
+                cut_mask = (rq_values_all > value_lower) & (rq_values_all < value_upper)
             else:
-                cut_mask = self.df[self.cut_rq].values < value_upper
-                
-        elif ('sigma_lower' in cut_pars):
-            #for sigma calculations, if we need them
-            values = self.df.evaluate(self.cut_rq, selection = True)
+                cut_mask = rq_values_all < value_upper
+
+        elif 'sigma_lower' in cut_pars:
             median = np.percentile(values, 50)
-            sigma = np.mean([np.percentile(values, 50 - 68.27/2.0) - median, 
-                            median - np.percentile(values, 50 + 68.27/2.0)])
+            sigma = np.mean([
+                np.percentile(values, 50 - 68.27 / 2.0) - median,
+                median - np.percentile(values, 50 + 68.27 / 2.0),
+            ])
             sigma = np.abs(sigma)
-            
             value_lower = median + sigma * cut_pars['sigma_lower']
             self.values_lower[on_cut_bin] = value_lower
-            cut_mask = self.df[self.cut_rq] > value_lower
-            
-        elif('sigma' in cut_pars):
-            #for sigma calculations, if we need them
-            values = self.df.evaluate(self.cut_rq, selection = True)
+            cut_mask = rq_values_all > value_lower
+
+        elif 'sigma' in cut_pars:
             median = np.percentile(values, 50)
-            sigma = np.mean([np.percentile(values, 50 - 68.27/2.0) - median, 
-                            median - np.percentile(values, 50 + 68.27/2.0)])
+            sigma = np.mean([
+                np.percentile(values, 50 - 68.27 / 2.0) - median,
+                median - np.percentile(values, 50 + 68.27 / 2.0),
+            ])
             sigma = np.abs(sigma)
-            
             value_upper = median + sigma * cut_pars['sigma']
             value_lower = median - sigma * cut_pars['sigma']
             self.values_upper[on_cut_bin] = value_upper
             self.values_lower[on_cut_bin] = value_lower
-            
-            bool_arr_lower = self.df[self.cut_rq].values > value_lower
-            bool_arr_upper = self.df[self.cut_rq].values < value_upper
-            
-            cut_mask = bool_arr_lower & bool_arr_upper
-          
+            cut_mask = (rq_values_all > value_lower) & (rq_values_all < value_upper)
+        else:
+            raise ValueError('cut_pars does not contain a supported cut definition')
+
         if lgcdiagnostics:
-            if 'value_lower' in locals():
+            if value_lower is not None:
                 print("Lower limit for cuts: " + str(value_lower))
-            if 'value_upper' in locals():
+            if value_upper is not None:
                 print("Upper limit for cuts: " + str(value_upper))
-        
-        if 'value_lower' in locals():
+
+        if value_lower is not None:
             self.value_lower_arr.append(value_lower)
         else:
-            self.value_lower_arr.append(min(self.df[self.cut_rq].values))
-        if 'value_upper' in locals():
+            self.value_lower_arr.append(float(np.min(rq_values_all)))
+        if value_upper is not None:
             self.value_upper_arr.append(value_upper)
         else:
-            self.value_upper_arr.append(max(self.df[self.cut_rq].values))
-          
+            self.value_upper_arr.append(float(np.max(rq_values_all)))
+
         overall_mask = cut_mask & lims_mask
         return overall_mask
             
@@ -775,7 +670,7 @@ class Semiautocut:
         
         self.mask = self._get_cut_mask(lgcdiagnostics=lgcdiagnostics,
                                        include_previous_cuts=include_previous_cuts,
-                                       on_cut_bin=0)
+                                                              on_cut_bin=0)
            
     def _do_time_binned_cut(self, lgcdiagnostics=False, include_previous_cuts=False):
         """
@@ -815,7 +710,7 @@ class Semiautocut:
             current_mask = self._get_cut_mask(time_lims=time_lims_arr, cut_pars=current_exception_pars,
                                               lgcdiagnostics=lgcdiagnostics, 
                                               include_previous_cuts=include_previous_cuts,
-                                              on_cut_bin=i)
+                                                                            on_cut_bin=i)
             working_mask = working_mask | current_mask
                 
             i += 1
@@ -834,7 +729,7 @@ class Semiautocut:
         current_mask = self._get_cut_mask(time_lims=time_lims_arr, cut_pars=current_exception_pars, 
                                           lgcdiagnostics=lgcdiagnostics,
                                           include_previous_cuts=include_previous_cuts,
-                                          on_cut_bin=i + 1)
+                                                                    on_cut_bin=i + 1)
         working_mask = working_mask | current_mask
         """
         
@@ -842,34 +737,12 @@ class Semiautocut:
         
     def _do_time_binned_count_cut(self, lgcdiagnostics=False, include_previous_cuts=False):
         """
-        Takes time binned cut (i.e divide the data up into a number of time bins), and 
-        based on the count of events within a certain range of the RQ being cut on (e.g.
-        baseline between val_lower and val_upper) decides whether or not to cut the entire
-        time bin. Can decide to cut based on either a number of events above which to cut,
-        the percentile of events over which to cut, or the sigma value of events over which
-        to cut.
-        
-        Parameters
-        ----------
-        
-        lgcdiagnostics : bool, optional
-            Prints diagnostic statements
-            
-        include_previous_cuts : bool or array, optional
-            Option to generate the automatic cut values from events that pass
-            previous rounds of cuts (i.e. cutting in ofamp vs. chi2 space, 
-            generating cut levels only from the distributiuon of events that
-            pass baseline and slope cuts). If True, uses all RQs in the dataframe
-            starting with 'cut_' and including the channel name. If an array of
-            names, uses those cut RQ names.
+        Time-binned cut based on the count of events in a given RQ range.
+        Previous cuts are used only to define the sample being counted.
         """
-        
-        #array of what bins to cut, starts as passing all events
-        bin_cut_arr = np.ones(len(self.time_bins_arr), dtype='bool')
-        
-        #array of number of events per bin, starts off as zeros
+        bin_cut_arr = np.ones(len(self.time_bins_arr), dtype=bool)
         bin_num_arr = np.zeros(len(self.time_bins_arr))
-        
+
         if "time_arr_num" in self.cut_pars:
             val_lower = self.cut_pars["time_arr_num"][1]
             val_upper = self.cut_pars["time_arr_num"][2]
@@ -879,91 +752,64 @@ class Semiautocut:
         elif "time_arr_sigma" in self.cut_pars:
             val_lower = self.cut_pars["time_arr_sigma"][1]
             val_upper = self.cut_pars["time_arr_sigma"][2]
-            
+        else:
+            raise ValueError("time_arr count cut requires one of time_arr_num/time_arr_percent/time_arr_sigma")
+
         if lgcdiagnostics:
             print("Lower value: " + str(val_lower))
             print("Upper value: " + str(val_upper))
-            
+
         self.value_lower_arr = np.ones(len(self.time_bins_arr)) * val_lower
         self.value_upper_arr = np.ones(len(self.time_bins_arr)) * val_upper
-        
-        i = 0
-        while i < len(self.time_bins_arr):
-            #make temporary time bins array with extra last bin for edge of
-            #last bin
-            time_bins_arr_ = self.time_bins_arr.tolist()
-            time_bins_arr_.append(max(self.df.event_time.values))
-            
-            #reset selection 
-            self.df['_trues'] = np.ones(len(self.df), dtype = 'bool')
-            self.df.select('_trues', mode='replace')
-            
-            #time selection
-            self.df.select(self.df.event_time > time_bins_arr_[i], mode='and')
-            self.df.select(self.df.event_time < time_bins_arr_[i + 1], mode='and')
-            
-            #values selection
-            self.df.select(self.df[self.cut_rq] > val_lower, mode='and')
-            self.df.select(self.df[self.cut_rq] < val_upper, mode='and')
-            
-            #number of events in selection
-            num_events_in_bin = self.df.selected_length()
-            bin_num_arr[i] = num_events_in_bin
-            
-            #reset selection 
-            self.df['_trues'] = np.ones(len(self.df), dtype = 'bool')
-            self.df.select('_trues', mode='replace')
-            
-            i += 1
-        
+
+        prev_cut_names = self._get_previous_cut_names(
+            include_previous_cuts=include_previous_cuts,
+        )
+        prev_mask = self._combine_cut_columns(prev_cut_names)
+
+        time_bins_arr_ = self.time_bins_arr.tolist()
+        time_bins_arr_.append(max(self.df.event_time.values))
+        rq_values = np.asarray(self.df[self.cut_rq].values)
+        event_times = np.asarray(self.df.event_time.values)
+
+        for i in range(len(self.time_bins_arr)):
+            time_mask = (event_times > time_bins_arr_[i]) & (event_times < time_bins_arr_[i + 1])
+            value_mask = (rq_values > val_lower) & (rq_values < val_upper)
+            bin_num_arr[i] = int(np.count_nonzero(prev_mask & time_mask & value_mask))
+
         if lgcdiagnostics:
             print("Number of events per time bin in set region: " + str(bin_num_arr))
-        
+
         if "time_arr_num" in self.cut_pars:
             cut_num = self.cut_pars['time_arr_num'][0]
         elif "time_arr_percent" in self.cut_pars:
-            percent_to_cut = self.cut_pars['time_arr_percent'][0] * 100
-            cut_num = np.percentile(bin_num_arr, percent_to_cut)
-        elif "time_arr_sigma" in self.cut_pars:
+            cut_num = np.percentile(bin_num_arr, self.cut_pars['time_arr_percent'][0] * 100)
+        else:
             sigma_to_cut = self.cut_pars['time_arr_sigma'][0]
             median = np.percentile(bin_num_arr, 50)
-            sigma = np.mean([np.percentile(bin_num_arr, 50 - 68.27/2.0) - median, 
-                            median - np.percentile(bin_num_arr, 50 + 68.27/2.0)])
+            sigma = np.mean([
+                np.percentile(bin_num_arr, 50 - 68.27 / 2.0) - median,
+                median - np.percentile(bin_num_arr, 50 + 68.27 / 2.0),
+            ])
             sigma = np.abs(sigma)
             cut_num = median + sigma_to_cut * sigma
-           
+
         if lgcdiagnostics:
             print("Cut number (cut bins with more events than this): " + str(cut_num))
-           
-        i = 0
-        while i < len(self.time_bins_arr):
-            if bin_num_arr[i] > cut_num:
-                bin_cut_arr[i] = True
-            else:
-                bin_cut_arr[i] = False
-            i += 1
-            
-        working_mask = np.ones(len(self.df), dtype='bool')
-        event_times_arr = self.df.event_time.values
-        #make temporary time bins array with extra last bin for edge of
-        #last bin
-        time_bins_arr_ = self.time_bins_arr.tolist()
-        time_bins_arr_.append(max(self.df.event_time.values))
-            
-        i = 0
-        while i < len(event_times_arr):
-            j = 0
-            while j < len(self.time_bins_arr):
-                if (event_times_arr[i] > time_bins_arr_[j]) and (event_times_arr[i] < time_bins_arr_[j + 1]):
-                    if bin_cut_arr[j]:
+
+        for i in range(len(self.time_bins_arr)):
+            bin_cut_arr[i] = not (bin_num_arr[i] > cut_num)
+
+        working_mask = np.ones(len(self.df), dtype=bool)
+        for i, event_time in enumerate(event_times):
+            for j in range(len(self.time_bins_arr)):
+                if (event_time > time_bins_arr_[j]) and (event_time < time_bins_arr_[j + 1]):
+                    if not bin_cut_arr[j]:
                         working_mask[i] = False
-                j += 1
-            i += 1
-            
+                    break
+
         self.mask = working_mask
-            
-        
-            
+
     def _do_ofamp_binned_cut(self, lgcdiagnostics=False, include_previous_cuts=False):
         """
         Performs a ofamp binned cut, with exceptions in the
@@ -1003,7 +849,7 @@ class Semiautocut:
             current_mask = self._get_cut_mask(ofamp_lims=ofamp_lims_arr, cut_pars=current_exception_pars, 
                                               lgcdiagnostics=lgcdiagnostics,
                                               include_previous_cuts=include_previous_cuts, 
-                                              on_cut_bin=i)
+                                                                            on_cut_bin=i)
             working_mask = working_mask | current_mask
                 
             i += 1
@@ -1021,7 +867,7 @@ class Semiautocut:
         current_mask = self._get_cut_mask(ofamp_lims=ofamp_lims_arr, cut_pars=current_exception_pars, 
                                           lgcdiagnostics=lgcdiagnostics,
                                           include_previous_cuts=include_previous_cuts,
-                                          on_cut_bin =i + 1)
+                                                                    on_cut_bin =i + 1)
         working_mask = working_mask | current_mask
         
         self.mask = working_mask
@@ -2117,7 +1963,7 @@ class MasterSemiautocuts:
         
         """
         
-        self.df = df
+        self.df = df.copy()
         self.cuts_list = cuts_list
         self.channel_name = channel_name
         self.mask = np.zeros(len(df), dtype = 'bool')
@@ -2208,8 +2054,8 @@ class MasterSemiautocuts:
                    channel_name=' ', cut_pars=[],
                    lgc_diagnostics=lgc_diagnostics)
             SAC.load_cut_dict(cut_dicts_arr[i], lgc_diagnostics=lgc_diagnostics)
-            _ = SAC.do_cut(lgcdiagnostics=lgc_diagnostics)
-            
+            mask = SAC.do_cut(lgcdiagnostics=lgc_diagnostics)
+            self.df[cut_dicts_arr[i]['cut_name']] = mask
             cuts_list.append(cut_dicts_arr[i]['cut_name'])
             
             i += 1
@@ -2217,58 +2063,51 @@ class MasterSemiautocuts:
         self.cuts_list = cuts_list
                                
         
-    def combine_cuts(self, sat_pass_threshold=None, cut_name=None,
-                     lgc_diagnostics=False):
+    def get_combined_cuts(self, sat_pass_threshold=None, cut_name=None,
+                          lgc_diagnostics=False):
         """
-        Combines the cuts specified during initializtion
-        into one.
-        
-        Parameters
-        ----------
-        
-        sat_pass_threshold : float, optional
-            If not none, this is the value above which all
-            events will be passed. Used for saturated events,
-            which will fail the slope and possibly chi2 cuts.
-            
-        cut_name : string, optional
-            If not none, this is the name of the cut created.
-            
-        lgc_diagnostics : bool, optional
-            If True, prints out diagnostic statements
-        
+        Combine the cuts specified during initialization and return the
+        resulting boolean mask. If cut_name is provided, also store it as a
+        dataframe column.
         """
-        
         self.cut_name = cut_name
-        
-        cuts_all_arr = np.ones(len(self.df), dtype = 'bool')
-            
+        cuts_all_arr = np.ones(len(self.df), dtype=bool)
+
         if lgc_diagnostics:
             print("Combining cuts: " + str(self.cuts_list))
-            
-        i = 0
-        while i < len(self.cuts_list):
-            current_cut_arr = self.df[self.cuts_list[i]].values
+
+        for i, cut_name_i in enumerate(self.cuts_list):
+            current_cut_arr = np.asarray(self.df[cut_name_i].values).astype(bool)
             cuts_all_arr = np.logical_and(cuts_all_arr, current_cut_arr)
             if lgc_diagnostics:
                 print("Done with cut " + str(i))
-            
-            i += 1
-            
-            
+
         if sat_pass_threshold is not None:
-            ofamps_arr_all = self.df[self.ofamp_rq].values
-            ofamp_thresh_mask = (ofamps_arr_all > sat_pass_threshold)
-            
+            ofamps_arr_all = np.asarray(self.df[self.ofamp_rq].values)
+            ofamp_thresh_mask = ofamps_arr_all > sat_pass_threshold
             cuts_all_arr = np.logical_or(cuts_all_arr, ofamp_thresh_mask)
             if lgc_diagnostics:
                 print("Passed saturated events above " + str(sat_pass_threshold))
-        
+
         if cut_name is None:
             self.cut_name = 'cut_all_' + self.channel_name
-        self.df[self.cut_name] = cuts_all_arr
-            
+        else:
+            self.cut_name = cut_name
+
+        if self.cut_name is not None:
+            self.df[self.cut_name] = cuts_all_arr
+
         self.mask = cuts_all_arr
+        return cuts_all_arr
+
+    def combine_cuts(self, sat_pass_threshold=None, cut_name=None,
+                     lgc_diagnostics=False):
+        """Backward-compatible wrapper for get_combined_cuts."""
+        return self.get_combined_cuts(
+            sat_pass_threshold=sat_pass_threshold,
+            cut_name=cut_name,
+            lgc_diagnostics=lgc_diagnostics,
+        )
         
     def create_load_combine_cuts(self, master_dict, lgc_diagnostics=False):
         """
@@ -2312,7 +2151,7 @@ class MasterSemiautocuts:
             
             self.cuts_list = cuts_to_combine
             
-        self.combine_cuts(sat_pass_threshold=combo['sat_pass_threshold'],
+        self.get_combined_cuts(sat_pass_threshold=combo['sat_pass_threshold'],
                           cut_name=combo['cut_name'],
                           lgc_diagnostics=lgc_diagnostics)
         if lgc_diagnostics:
