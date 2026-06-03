@@ -43,6 +43,11 @@ class Vibration_Analyzer(Analyzer):
     # Valid transfer function estimation methods.
     VALID_TF_METHODS = ('mean_ratio', 'cross_correlation', 'phase_locked')
 
+    # Default number of log-spaced points used by plot_transfer_function /
+    # plot_psd when log_downsample=True. Chosen to stay well below matplotlib
+    # Agg's cell block limit while preserving visual fidelity on a log x-axis.
+    _LOG_DOWNSAMPLE_DEFAULT_POINTS = 20000
+
     # Intrinsic accelerometer noise floor (from accelerometer spec sheet).
     # Piecewise-constant: value at index k applies from FREQS_HZ[k] to FREQS_HZ[k+1].
     _NOISE_FLOOR_FREQS_HZ      = np.array([0.1, 10.0, 100.0, 1000.0])
@@ -437,13 +442,22 @@ class Vibration_Analyzer(Analyzer):
                 with np.errstate(divide='ignore', invalid='ignore'):
                     tf_cross = np.abs(mean_cross / mean_auto_in)
 
-                # Cross-correlation uncertainty is not analytically straightforward;
-                # store NaN placeholder for transfer_sigma
+                # Propagate uncertainty on the cross-correlation TF magnitude via
+                # the same ratio rule used for mean_ratio (PSD sampling variance):
+                # sigma_T / T = sqrt( (sigma_out/asd_out)^2 + (sigma_in/asd_in)^2 )
+                # This is valid in the high-SNR regime where cross-correlation and
+                # mean-ratio TFs converge.
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    tf_cross_sigma = tf_cross * np.sqrt(
+                        (sigma_out / asd_out) ** 2.0
+                        + (sigma_in / asd_in) ** 2.0
+                    )
+
                 cross_correlation_results.append({
                     'channel_output': ch_out,
                     'channel_input': ch_in,
                     'transfer_function': tf_cross,
-                    'transfer_sigma': np.full_like(tf_cross, np.nan),
+                    'transfer_sigma': tf_cross_sigma,
                     'freqs': freqs,
                     'method': 'cross_correlation',
                 })
@@ -928,9 +942,62 @@ class Vibration_Analyzer(Analyzer):
         ]
         self._transfer_functions[method_name] = kept + list(new_results)
 
+    @staticmethod
+    def _log_downsample_indices(freqs, n_points):
+        """
+        Return a sorted, deduplicated array of frequency-bin indices that are
+        approximately log-spaced over the positive part of ``freqs``, or None
+        if downsampling is disabled.
+
+        Parameters
+        ----------
+        freqs : np.ndarray
+            Frequency array (typically linearly spaced from an FFT).
+        n_points : int or None
+            Target number of log-spaced points. If None or if
+            ``n_points >= freqs.size``, returns None (no downsampling needed).
+
+        Returns
+        -------
+        idx : np.ndarray of int, or None
+            Sorted indices selecting a log-spaced subset. None if no
+            downsampling should be applied.
+        """
+        # No downsampling requested, or fewer bins than target — use full array
+        if n_points is None:
+            return None
+        n_total = freqs.size
+        if n_points >= n_total:
+            return None
+
+        # Positive frequencies only (log requires > 0). Guard against DC bin by
+        # starting from the first strictly positive frequency index.
+        positive_mask = freqs > 0
+        positive_indices = np.where(positive_mask)[0]
+        if positive_indices.size == 0:
+            return None
+
+        i_start = int(positive_indices[0])
+        i_end = n_total - 1
+
+        # Build log-spaced indices across the positive-frequency range, convert
+        # to integer bin indices, deduplicate, and sort.
+        log_idx = np.unique(
+            np.round(
+                np.logspace(np.log10(i_start + 1), np.log10(i_end + 1), n_points)
+            ).astype(int) - 1
+        )
+        log_idx = np.clip(log_idx, 0, i_end)
+
+        # Preserve indices outside the positive range (e.g., DC bin) at start
+        if i_start > 0:
+            log_idx = np.unique(np.concatenate(([0], log_idx)))
+
+        return log_idx
+
     # Linestyle mapping for multi-method overlay plots
     _METHOD_LINESTYLES = {
-        'mean_ratio':       ('-',  ' (mean ratio)'),
+        'mean_ratio':       ('-',  ' (RMS ratio)'),
         'cross_correlation': ('--', ' (cross-correlation)'),
         'phase_locked':     ('-.', ' (phase-locked)'),
     }
@@ -965,7 +1032,7 @@ class Vibration_Analyzer(Analyzer):
 
             methods_to_plot = []
             if method in ('both', 'all'):
-                methods_to_plot = [('mean_ratio', '-', ' (mean ratio)'),
+                methods_to_plot = [('mean_ratio', '-', ' (RMS ratio)'),
                                    ('cross_correlation', '--', ' (cross-correlation)')]
             elif method in ('mean_ratio', 'cross_correlation'):
                 methods_to_plot = [(method, '-', '')]
@@ -1091,7 +1158,7 @@ class Vibration_Analyzer(Analyzer):
         return groups
 
     def plot_transfer_function(self, channel_pairs=None, figsize=(14, 6), method=None,
-                               show_uncertainty=True):
+                               show_uncertainty=True, log_downsample=False):
         """
         Plot the transfer function magnitude for one or more channel pairs with
         1-sigma uncertainty bands and a secondary dB axis.
@@ -1123,12 +1190,26 @@ class Vibration_Analyzer(Analyzer):
             If a single bool, applies to all method groups. If a list, must have
             one entry per method group (same length as the resolved method list).
             Default: True.
+        log_downsample : bool or int, optional
+            If True, logarithmically downsample the plotted line and uncertainty
+            band to _LOG_DOWNSAMPLE_DEFAULT_POINTS log-spaced frequency bins
+            before drawing. If an int, use that many points. Useful when raw-noise
+            PSDs have millions of linear bins, which can exceed matplotlib Agg's
+            cell block limit during rendering. The underlying cached transfer
+            function data is not modified. Default: False.
 
         Returns
         -------
         fig : matplotlib.figure.Figure
         ax  : matplotlib.axes.Axes
         """
+        # Resolve the number of log-spaced points to use if downsampling is on
+        if log_downsample is False or log_downsample is None:
+            n_downsample = None
+        elif log_downsample is True:
+            n_downsample = self._LOG_DOWNSAMPLE_DEFAULT_POINTS
+        else:
+            n_downsample = int(log_downsample)
         # Normalize a bare pair like ['Stage1', 'Ground'] to [['Stage1', 'Ground']]
         if channel_pairs is not None and channel_pairs and isinstance(channel_pairs[0], str):
             channel_pairs = [channel_pairs]
@@ -1173,10 +1254,18 @@ class Vibration_Analyzer(Analyzer):
                 tf_mag = np.abs(tf_raw) if np.iscomplexobj(tf_raw) else tf_raw
                 all_tf_values.append(tf_mag)
 
+                # Optionally select a log-spaced subset of frequency indices. This
+                # keeps the plotted polygon/line size manageable for raw-noise PSDs
+                # that have millions of linear FFT bins (which can otherwise exceed
+                # matplotlib Agg's cell block limit when drawing fill_between).
+                plot_idx = self._log_downsample_indices(freqs, n_downsample)
+                plot_freqs = freqs if plot_idx is None else freqs[plot_idx]
+                plot_tf_mag = tf_mag if plot_idx is None else tf_mag[plot_idx]
+
                 # Plot transfer function magnitude
                 ax.loglog(
-                    freqs,
-                    tf_mag,
+                    plot_freqs,
+                    plot_tf_mag,
                     marker="o",
                     markersize=0,
                     linestyle=linestyle,
@@ -1187,12 +1276,21 @@ class Vibration_Analyzer(Analyzer):
 
                 # Draw uncertainty band if enabled and sigma is not all NaN
                 if draw_uncertainty and not np.all(np.isnan(tf_sig)):
+                    plot_tf_sig = tf_sig if plot_idx is None else tf_sig[plot_idx]
+
                     # Build 1-sigma bounds; keep lower bound positive for log-scale
-                    lower = np.maximum(tf_mag - tf_sig, np.finfo(float).tiny)
-                    upper = tf_mag + tf_sig
+                    lower = np.maximum(plot_tf_mag - plot_tf_sig,
+                                       np.finfo(float).tiny)
+                    upper = plot_tf_mag + plot_tf_sig
+
+                    # Mask non-finite bounds — fill_between treats NaN as a polygon
+                    # break, which avoids drawing to infinite y on log scale.
+                    bad = ~np.isfinite(lower) | ~np.isfinite(upper)
+                    lower = np.where(bad, np.nan, lower)
+                    upper = np.where(bad, np.nan, upper)
 
                     ax.fill_between(
-                        freqs,
+                        plot_freqs,
                         lower,
                         upper,
                         color=color,
@@ -1406,7 +1504,13 @@ class Vibration_Analyzer(Analyzer):
 
         return fig, ax
 
-    def plot_psd(self, channels=None, figsize=(14, 6), show_variance=True):
+    def plot_psd(
+        self,
+        channels=None,
+        figsize=(14, 6),
+        show_variance=True,
+        colors=None,
+    ):
         """
         Plot the ASD for one or more channels with 1-sigma uncertainty bands and the
         intrinsic accelerometer noise floor.
@@ -1425,6 +1529,9 @@ class Vibration_Analyzer(Analyzer):
         show_variance : bool, optional
             If True, draw the ±1-sigma uncertainty band around each
             channel's PSD. Default: True.
+        colors : dict of {str: str}, optional
+            Mapping from channel name to matplotlib color. Channels not in
+            the mapping fall back to the default property cycle.
 
         Returns
         -------
@@ -1462,7 +1569,12 @@ class Vibration_Analyzer(Analyzer):
         min_amp = np.inf
         for i, chan in enumerate(channels):
             chan_idx = self._channels.index(chan)
-            color    = prop_cycle_colors[i % len(prop_cycle_colors)]
+            # Use caller-supplied color for this channel if provided,
+            # otherwise fall back to the default matplotlib prop cycle
+            if (colors is not None) and (chan in colors):
+                color = colors[chan]
+            else:
+                color = prop_cycle_colors[i % len(prop_cycle_colors)]
 
             amp   = np.sqrt(self._psd[chan_idx, :])
             sigma = np.sqrt(self._variance[chan_idx, :])
@@ -1484,7 +1596,8 @@ class Vibration_Analyzer(Analyzer):
                 lower = np.maximum(amp - sigma, np.finfo(float).tiny)
                 upper = amp + sigma
 
-                # Draw uncertainty band
+                # Draw uncertainty band; the band is intentionally unlabeled
+                # so it does not clutter the legend
                 ax.fill_between(
                     freqs,
                     lower,
@@ -1492,7 +1605,6 @@ class Vibration_Analyzer(Analyzer):
                     color=color,
                     alpha=0.2,
                     linewidth=1,
-                    label="±σ/√n",
                 )
 
         # Plot intrinsic noise floor as piecewise-constant horizontal segments
