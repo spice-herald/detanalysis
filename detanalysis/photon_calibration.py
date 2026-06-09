@@ -509,10 +509,10 @@ class PhotonCalibration:
                 ax.set_ylim(1e-1, 1.25*max(spectrum_vals))
                 ax.set_yscale('log')
             ax.legend()
-            ax.xlabel(amp_rq)
-            ax.ylabel("Counts Per Bin")
+            ax.set_xlabel(amp_rq)
+            ax.set_ylabel("Counts Per Bin")
 
-            return fig, ax            
+            plt.show()#return fig, ax            
         
         def _resid(params):
             modeled_vals = self._model_spectrum(spectrum_bin_centers, 
@@ -2212,6 +2212,19 @@ class PhotonCalibration:
         height_unscaled_list = []
         peak_keys_list = list(self.fit_vars_dict.keys())
         peak_keys_list.sort()
+
+        if self.template_model == 'onepulse':
+            headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err']
+        elif self.template_model == 'twopulse':
+            headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err', 'Height 2', 'Height 2 Err']
+        elif self.template_model == 'threepulse':
+            headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err', 'Height 2', 'Height 2 Err', 'Height 3', 'Height 3 Err']
+        elif self.template_model == 'deltapulse':
+            headers_ = ['Photon Peak', 'Height 1 (Delta)', 'Height 1 Err (Delta)', 'Height 2', 'Height 2 Err']
+        elif self.template_model == 'deltatwopulse':
+            headers_ = ['Photon Peak', 'Height 1 (Delta)', 'Height 1 Err (Delta)', 'Height 2', 'Height 2 Err', 'Height 3', 'Height 3 Err']
+        else:
+            headers_ = ['Photon Peak']
         
         i = 0
         while i < len(peak_keys_list):
@@ -2348,12 +2361,12 @@ class PhotonCalibration:
                 amp_1, amp_2, amp_3, fall_2, fall_3, rise = popt
                 amp_1_err, amp_2_err, amp_3_err, fall_2_err, fall_3_err, rise_err = pstds
                 
-                height_unscaled_list_element.append(amp_1/i)
-                height_unscaled_list_element.append(amp_1_err/i)
-                height_unscaled_list_element.append(amp_2/i)
-                height_unscaled_list_element.append(amp_2_err/i)
-                height_unscaled_list_element.append(amp_3/i)
-                height_unscaled_list_element.append(amp_3_err/i)
+                height_scaled_list_element.append(amp_1/i)
+                height_scaled_list_element.append(amp_1_err/i)
+                height_scaled_list_element.append(amp_2/i)
+                height_scaled_list_element.append(amp_2_err/i)
+                height_scaled_list_element.append(amp_3/i)
+                height_scaled_list_element.append(amp_3_err/i)
                 
                 headers_ = ['Photon Peak', 'Height 1 (Delta)', 'Height 1 Err (Delta)', 'Height 2', 'Height 2 Err', 'Height 3', 'Height 3 Err']
             height_scaled_list.append(height_scaled_list_element)
