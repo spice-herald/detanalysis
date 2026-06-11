@@ -509,10 +509,10 @@ class PhotonCalibration:
                 ax.set_ylim(1e-1, 1.25*max(spectrum_vals))
                 ax.set_yscale('log')
             ax.legend()
-            ax.xlabel(amp_rq)
-            ax.ylabel("Counts Per Bin")
+            ax.set_xlabel(amp_rq)
+            ax.set_ylabel("Counts Per Bin")
 
-            return fig, ax            
+            plt.show()        
         
         def _resid(params):
             modeled_vals = self._model_spectrum(spectrum_bin_centers, 
@@ -1591,9 +1591,9 @@ class PhotonCalibration:
             model_template_f = self._get_threepole_f_template(amp_1, amp_2, fall_1, fall_2,
                                                               rise, t_arr, start_time, fs=fs)
         
-        elif self.template_model == 'threepole':
+        elif self.template_model == 'fourpole':
             amp_1, amp_2, amp_3, fall_1, fall_2, fall_3, rise = params
-            model_template_f = self._get_threepole_f_template(amp_1, amp_2, amp_3, fall_1, 
+            model_template_f = self._get_fourpole_f_template(amp_1, amp_2, amp_3, fall_1, 
                                                               fall_2, fall_3, rise, t_arr,
                                                               start_time, fs=fs)
                
@@ -1636,9 +1636,9 @@ class PhotonCalibration:
             model_template_t = self._get_threepole_t_template(amp_1, amp_2, fall_1, fall_2,
                                                               rise, t_arr, start_time, fs=fs)
         
-        elif self.template_model == 'threepole':
+        elif self.template_model == 'fourpole':
             amp_1, amp_2, amp_3, fall_1, fall_2, fall_3, rise = params
-            model_template_t = self._get_threepole_t_template(amp_1, amp_2, amp_3, fall_1, 
+            model_template_t = self._get_fourpole_t_template(amp_1, amp_2, amp_3, fall_1, 
                                                               fall_2, fall_3, rise, t_arr,
                                                               start_time, fs=fs)
                
@@ -2173,16 +2173,12 @@ class PhotonCalibration:
                 j += 1
             i += 1
             
-        if self.template_model == 'onepulse':
+        if self.template_model == 'twopole':
             labels = ['Amp 1', "Fall 1", "Rise"]
-        elif self.template_model == 'twopulse':
+        elif self.template_model == 'threepole':
             labels = ['Amp 1', 'Amp 2', "Fall 1", "Fall 2", "Rise"]
-        elif self.template_model == 'threepulse':
+        elif self.template_model == 'fourpole':
             labels = ['Amp 1', 'Amp 2', 'Amp 3', "Fall 1", "Fall 2", 'Fall 3', "Rise"]
-        elif self.template_model == 'deltapulse':
-            labels = ['Delta Amplitude', 'Pulse Amplitude', 'Pulse Fall', 'Pulse Rise']
-        elif self.template_model == 'deltatwopulse':
-            labels = ['Delta Amplitude', 'First Pulse Amplitude', 'Second Pulse Amplitude', 'First Pulse Fall', 'Second Pulse Fall', 'Pulse Rise']
         else:
             labels = np.zeros(len(opt))
             
@@ -2212,6 +2208,15 @@ class PhotonCalibration:
         height_unscaled_list = []
         peak_keys_list = list(self.fit_vars_dict.keys())
         peak_keys_list.sort()
+
+        if self.template_model == 'twopole':
+            headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err']
+        elif self.template_model == 'threepole':
+            headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err', 'Height 2', 'Height 2 Err']
+        elif self.template_model == 'fourpole':
+            headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err', 'Height 2', 'Height 2 Err', 'Height 3', 'Height 3 Err']
+        else:
+            headers_ = ['Photon Peak']
         
         i = 0
         while i < len(peak_keys_list):
@@ -2224,7 +2229,7 @@ class PhotonCalibration:
             pcov = self.fit_cov_dict[photon_peak_number]
             pstds = np.sqrt(np.diag(pcov))
             
-            if self.template_model == 'onepulse':
+            if self.template_model == 'twopole':
                 amp_1, fall_1, rise = popt
                 amp_1_err, fall_1_err, rise_err = pstds
                 
@@ -2233,7 +2238,7 @@ class PhotonCalibration:
                 
                 headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err']
             
-            elif self.template_model == 'twopulse':
+            elif self.template_model == 'threepole':
                 amp_1, amp_2, fall_1, fall_2, rise = popt
                 amp_1_err, amp_2_err, fall_1_err, fall_2_err, rise_err = pstds
                 
@@ -2244,7 +2249,7 @@ class PhotonCalibration:
                 
                 headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err', 'Height 2', 'Height 2 Err']
             
-            elif self.template_model == 'threepulse':
+            elif self.template_model == 'fourpole':
                 amp_1, amp_2, amp_3, fall_1, fall_2, fall_3, rise = popt
                 amp_1_err, amp_2_err, amp_3_err, fall_1_err, fall_2_err, fall_3_err, rise_err = pstds
                 
@@ -2256,28 +2261,7 @@ class PhotonCalibration:
                 height_unscaled_list_element.append(amp_3_err)
                 
                 headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err', 'Height 2', 'Height 2 Err', 'Height 3', 'Height 3 Err']
-            elif self.template_model == 'deltapulse':
-                amp_1, amp_2, fall_2, rise = popt
-                amp_1_err, amp_2_err, fall_2_err, rise_err = pstds
-                
-                height_unscaled_list_element.append(amp_1)
-                height_unscaled_list_element.append(amp_1_err)
-                height_unscaled_list_element.append(amp_2)
-                height_unscaled_list_element.append(amp_2_err)
-                
-                headers_ = ['Photon Peak', 'Height 1 (Delta)', 'Height 1 Err (Delta)', 'Height 2', 'Height 2 Err']
-            elif self.template_model == 'deltatwopulse':
-                amp_1, amp_2, amp_3, fall_2, fall_3, rise = popt
-                amp_1_err, amp_2_err, amp_3_err, fall_2_err, fall_3_err, rise_err = pstds
-                
-                height_unscaled_list_element.append(amp_1)
-                height_unscaled_list_element.append(amp_1_err)
-                height_unscaled_list_element.append(amp_2)
-                height_unscaled_list_element.append(amp_2_err)
-                height_unscaled_list_element.append(amp_3)
-                height_unscaled_list_element.append(amp_3_err)
-                
-                headers_ = ['Photon Peak', 'Height 1 (Delta)', 'Height 1 Err (Delta)', 'Height 2', 'Height 2 Err', 'Height 3', 'Height 3 Err']
+ 
             height_unscaled_list.append(height_unscaled_list_element)
             i += 1
                 
@@ -2301,7 +2285,7 @@ class PhotonCalibration:
             pcov = self.fit_cov_dict[photon_peak_number]
             pstds = np.sqrt(np.diag(pcov))
             
-            if self.template_model == 'onepulse':
+            if self.template_model == 'twopole':
                 amp_1, fall_1, rise = popt
                 amp_1_err, fall_1_err, rise_err = pstds
                 
@@ -2310,7 +2294,7 @@ class PhotonCalibration:
                 
                 headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err']
             
-            elif self.template_model == 'twopulse':
+            elif self.template_model == 'threepole':
                 amp_1, amp_2, fall_1, fall_2, rise = popt
                 amp_1_err, amp_2_err, fall_1_err, fall_2_err, rise_err = pstds
                 
@@ -2321,7 +2305,7 @@ class PhotonCalibration:
                 
                 headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err', 'Height 2', 'Height 2 Err']
             
-            elif self.template_model == 'threepulse':
+            elif self.template_model == 'fourpole':
                 amp_1, amp_2, amp_3, fall_1, fall_2, fall_3, rise = popt
                 amp_1_err, amp_2_err, amp_3_err, fall_1_err, fall_2_err, fall_3_err, rise_err = pstds
                 
@@ -2334,28 +2318,6 @@ class PhotonCalibration:
                 
                 headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err', 'Height 2', 'Height 2 Err', 'Height 3', 'Height 3 Err']
 
-            elif self.template_model == 'deltapulse':
-                amp_1, amp_2, fall_2, rise = popt
-                amp_1_err, amp_2_err, fall_2_err, rise_err = pstds
-                
-                height_scaled_list_element.append(amp_1/i)
-                height_scaled_list_element.append(amp_1_err/i)
-                height_scaled_list_element.append(amp_2/i)
-                height_scaled_list_element.append(amp_2_err/i)
-                
-                headers_ = ['Photon Peak', 'Height 1 (Delta)', 'Height 1 Err', 'Height 2 (Pulse)', 'Height 2 Err']
-            elif self.template_model == 'deltatwopulse':
-                amp_1, amp_2, amp_3, fall_2, fall_3, rise = popt
-                amp_1_err, amp_2_err, amp_3_err, fall_2_err, fall_3_err, rise_err = pstds
-                
-                height_unscaled_list_element.append(amp_1/i)
-                height_unscaled_list_element.append(amp_1_err/i)
-                height_unscaled_list_element.append(amp_2/i)
-                height_unscaled_list_element.append(amp_2_err/i)
-                height_unscaled_list_element.append(amp_3/i)
-                height_unscaled_list_element.append(amp_3_err/i)
-                
-                headers_ = ['Photon Peak', 'Height 1 (Delta)', 'Height 1 Err (Delta)', 'Height 2', 'Height 2 Err', 'Height 3', 'Height 3 Err']
             height_scaled_list.append(height_scaled_list_element)
             i += 1
                 
@@ -2380,7 +2342,7 @@ class PhotonCalibration:
             pcov = self.fit_cov_dict[photon_peak_number]
             pstds = np.sqrt(np.diag(pcov))
             
-            if self.template_model == 'onepulse':
+            if self.template_model == 'twopole':
                 amp_1, fall_1, rise = popt
                 amp_1_err, fall_1_err, rise_err = pstds
                 
@@ -2391,7 +2353,7 @@ class PhotonCalibration:
                 
                 headers_ = ['Photon Peak', 'Fall 1 (us)', 'Fall 1 Err (us)', 'Rise (us)', 'Rise Err (us)']
             
-            elif self.template_model == 'twopulse':
+            elif self.template_model == 'threepole':
                 amp_1, amp_2, fall_1, fall_2, rise = popt
                 amp_1_err, amp_2_err, fall_1_err, fall_2_err, rise_err = pstds
                 
@@ -2404,7 +2366,7 @@ class PhotonCalibration:
                 
                 headers_ = ['Photon Peak', 'Fall 1 (us)', 'Fall 1 Err (us)', 'Fall 2 (us)', 'Fall 2 Err (us)', 'Rise (us)', 'Rise Err (us)']
             
-            elif self.template_model == 'threepulse':
+            elif self.template_model == 'fourpole':
                 amp_1, amp_2, amp_3, fall_1, fall_2, fall_3, rise = popt
                 amp_1_err, amp_2_err, amp_3_err, fall_1_err, fall_2_err, fall_3_err, rise_err = pstds
                 
@@ -2419,28 +2381,6 @@ class PhotonCalibration:
                 
                 headers_ = ['Photon Peak', 'Fall 1 (us)', 'Fall 1 Err (us)', 'Fall 2 (us)', 'Fall 2 Err (us)', 'Fall 3 (us)', 'Fall 3 Err (us)', 'Rise (us)', 'Rise Err (us)']
 
-            elif self.template_model == 'deltapulse':
-                amp_1, amp_2, fall_2, rise = popt
-                amp_1_err, amp_2_err, fall_2_err, rise_err = pstds
-                
-                fall_times_list_element.append(fall_2*1e6)
-                fall_times_list_element.append(fall_2_err*1e6)
-                fall_times_list_element.append(rise*1e6)
-                fall_times_list_element.append(rise_err*1e6)
-                
-                headers_ = ['Photon Peak', 'Fall 2 (us)', 'Fall 2 Err (us)', 'Rise (us)', 'Rise Err (us)']
-            elif self.template_model == 'deltatwopulse':
-                amp_1, amp_2, amp_3, fall_2, fall_3, rise = popt
-                amp_1_err, amp_2_err, amp_3_err, fall_2_err, fall_3_err, rise_err = pstds
-                
-                fall_times_list_element.append(fall_2*1e6)
-                fall_times_list_element.append(fall_2_err*1e6)
-                fall_times_list_element.append(fall_3*1e6)
-                fall_times_list_element.append(fall_3_err*1e6)
-                fall_times_list_element.append(rise*1e6)
-                fall_times_list_element.append(rise_err*1e6)
-                
-                headers_ = ['Photon Peak', 'Fall 2 (us)', 'Fall 2 Err (us)', 'Fall 3 (us)', 'Fall 3 Err (us)', 'Rise (us)', 'Rise Err (us)']
             fall_times_list.append(fall_times_list_element)
             i += 1
                 
