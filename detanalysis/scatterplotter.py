@@ -6,7 +6,7 @@ import matplotlib as mpl
 import vaex as vx
 from glob import glob
 import os
-import pytesdaq.io as h5io
+import pytesio as h5io
 import math
 from pprint import pprint
 import importlib
