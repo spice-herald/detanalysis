@@ -1585,11 +1585,11 @@ class PhotonCalibration:
             model_template_f = self._get_threepole_f_template(amp_1, amp_2, fall_1, fall_2,
                                                               rise, t_arr, start_time, fs=fs)
         
-        elif self.template_model == 'threepole':
+        elif self.template_model == 'fourpole':
             amp_1, amp_2, amp_3, fall_1, fall_2, fall_3, rise = params
-            model_template_f = self._get_threepole_f_template(amp_1, amp_2, amp_3, fall_1, 
-                                                              fall_2, fall_3, rise, t_arr,
-                                                              start_time, fs=fs)
+            model_template_f = self._get_fourpole_f_template(amp_1, amp_2, amp_3, fall_1,
+                                                             fall_2, fall_3, rise, t_arr,
+                                                             start_time, fs=fs)
                
         else:
             raise ValueError("Unknown template model!")
@@ -1630,11 +1630,11 @@ class PhotonCalibration:
             model_template_t = self._get_threepole_t_template(amp_1, amp_2, fall_1, fall_2,
                                                               rise, t_arr, start_time, fs=fs)
         
-        elif self.template_model == 'threepole':
+        elif self.template_model == 'fourpole':
             amp_1, amp_2, amp_3, fall_1, fall_2, fall_3, rise = params
-            model_template_t = self._get_threepole_t_template(amp_1, amp_2, amp_3, fall_1, 
-                                                              fall_2, fall_3, rise, t_arr,
-                                                              start_time, fs=fs)
+            model_template_t = self._get_fourpole_t_template(amp_1, amp_2, amp_3, fall_1,
+                                                             fall_2, fall_3, rise, t_arr,
+                                                             start_time, fs=fs)
                
         else:
             raise ValueError("Unknown template model!")
@@ -1912,7 +1912,10 @@ class PhotonCalibration:
         popt = np.asarray(result['x'], dtype=np.float64)
         jac = np.asarray(result['jac'], dtype=np.float64)
         pcovinv = np.dot(jac.transpose(), jac)
-        pcov = np.linalg.inv(pcovinv)
+        try:
+            pcov = np.linalg.inv(pcovinv)
+        except np.linalg.LinAlgError:
+            pcov = np.linalg.pinv(pcovinv)
         pstds = np.sqrt(np.diag(pcov))
         
         self.fit_vars_dict[photon_peak_number] = popt
@@ -2167,16 +2170,12 @@ class PhotonCalibration:
                 j += 1
             i += 1
             
-        if self.template_model == 'onepulse':
+        if self.template_model == 'twopole':
             labels = ['Amp 1', "Fall 1", "Rise"]
-        elif self.template_model == 'twopulse':
+        elif self.template_model == 'threepole':
             labels = ['Amp 1', 'Amp 2', "Fall 1", "Fall 2", "Rise"]
-        elif self.template_model == 'threepulse':
+        elif self.template_model == 'fourpole':
             labels = ['Amp 1', 'Amp 2', 'Amp 3', "Fall 1", "Fall 2", 'Fall 3', "Rise"]
-        elif self.template_model == 'deltapulse':
-            labels = ['Delta Amplitude', 'Pulse Amplitude', 'Pulse Fall', 'Pulse Rise']
-        elif self.template_model == 'deltatwopulse':
-            labels = ['Delta Amplitude', 'First Pulse Amplitude', 'Second Pulse Amplitude', 'First Pulse Fall', 'Second Pulse Fall', 'Pulse Rise']
         else:
             labels = np.zeros(len(opt))
             
@@ -2230,7 +2229,7 @@ class PhotonCalibration:
             elif self.template_model == 'twopulse':
                 amp_1, amp_2, fall_1, fall_2, rise = popt
                 amp_1_err, amp_2_err, fall_1_err, fall_2_err, rise_err = pstds
-                
+
                 height_unscaled_list_element.append(amp_1)
                 height_unscaled_list_element.append(amp_1_err)
                 height_unscaled_list_element.append(amp_2)
@@ -2238,7 +2237,15 @@ class PhotonCalibration:
                 
                 headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err', 'Height 2', 'Height 2 Err']
             
-            elif self.template_model == 'threepulse':
+            elif self.template_model == 'threepole':
+                amp_1, amp_2, fall_1, fall_2, rise = popt
+                amp_1_err, amp_2_err, fall_1_err, fall_2_err, rise_err = pstds
+                height_unscaled_list_element.append(amp_1)
+                height_unscaled_list_element.append(amp_1_err)
+                height_unscaled_list_element.append(amp_2)
+                height_unscaled_list_element.append(amp_2_err)
+                headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err', 'Height 2', 'Height 2 Err']
+            elif self.template_model == 'fourpole':
                 amp_1, amp_2, amp_3, fall_1, fall_2, fall_3, rise = popt
                 amp_1_err, amp_2_err, amp_3_err, fall_1_err, fall_2_err, fall_3_err, rise_err = pstds
                 
@@ -2307,7 +2314,7 @@ class PhotonCalibration:
             elif self.template_model == 'twopulse':
                 amp_1, amp_2, fall_1, fall_2, rise = popt
                 amp_1_err, amp_2_err, fall_1_err, fall_2_err, rise_err = pstds
-                
+
                 height_scaled_list_element.append(amp_1/i)
                 height_scaled_list_element.append(amp_1_err/i)
                 height_scaled_list_element.append(amp_2/i)
@@ -2315,7 +2322,15 @@ class PhotonCalibration:
                 
                 headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err', 'Height 2', 'Height 2 Err']
             
-            elif self.template_model == 'threepulse':
+            elif self.template_model == 'threepole':
+                amp_1, amp_2, fall_1, fall_2, rise = popt
+                amp_1_err, amp_2_err, fall_1_err, fall_2_err, rise_err = pstds
+                height_scaled_list_element.append(amp_1/i)
+                height_scaled_list_element.append(amp_1_err/i)
+                height_scaled_list_element.append(amp_2/i)
+                height_scaled_list_element.append(amp_2_err/i)
+                headers_ = ['Photon Peak', 'Height 1', 'Height 1 Err', 'Height 2', 'Height 2 Err']
+            elif self.template_model == 'fourpole':
                 amp_1, amp_2, amp_3, fall_1, fall_2, fall_3, rise = popt
                 amp_1_err, amp_2_err, amp_3_err, fall_1_err, fall_2_err, fall_3_err, rise_err = pstds
                 
@@ -2388,7 +2403,7 @@ class PhotonCalibration:
             elif self.template_model == 'twopulse':
                 amp_1, amp_2, fall_1, fall_2, rise = popt
                 amp_1_err, amp_2_err, fall_1_err, fall_2_err, rise_err = pstds
-                
+
                 fall_times_list_element.append(fall_1*1e6)
                 fall_times_list_element.append(fall_1_err*1e6)
                 fall_times_list_element.append(fall_2*1e6)
@@ -2398,7 +2413,17 @@ class PhotonCalibration:
                 
                 headers_ = ['Photon Peak', 'Fall 1 (us)', 'Fall 1 Err (us)', 'Fall 2 (us)', 'Fall 2 Err (us)', 'Rise (us)', 'Rise Err (us)']
             
-            elif self.template_model == 'threepulse':
+            elif self.template_model == 'threepole':
+                amp_1, amp_2, fall_1, fall_2, rise = popt
+                amp_1_err, amp_2_err, fall_1_err, fall_2_err, rise_err = pstds
+                fall_times_list_element.append(fall_1*1e6)
+                fall_times_list_element.append(fall_1_err*1e6)
+                fall_times_list_element.append(fall_2*1e6)
+                fall_times_list_element.append(fall_2_err*1e6)
+                fall_times_list_element.append(rise*1e6)
+                fall_times_list_element.append(rise_err*1e6)
+                headers_ = ['Photon Peak', 'Fall 1 (us)', 'Fall 1 Err (us)', 'Fall 2 (us)', 'Fall 2 Err (us)', 'Rise (us)', 'Rise Err (us)']
+            elif self.template_model == 'fourpole':
                 amp_1, amp_2, amp_3, fall_1, fall_2, fall_3, rise = popt
                 amp_1_err, amp_2_err, amp_3_err, fall_1_err, fall_2_err, fall_3_err, rise_err = pstds
                 
