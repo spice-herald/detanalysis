@@ -467,8 +467,8 @@ class PhotonCalibration:
                 std_guess = guess[npeaks:2*npeaks]
                 height_guess = guess[2*npeaks:3*npeaks]
 
-                mean_bounds = [[.5*guess for guess in mean_guess],
-                               [1.5*guess for guess in mean_guess]]
+                mean_bounds = [[-1.5*mean_guess[0]*np.sign(mean_guess[0])] + [.5*guess for guess in mean_guess[1:]],
+                               [.75*mean_guess[1]] + [1.5*guess for guess in mean_guess[1:]]]
                 
                 std_bounds = [[.5*guess for guess in std_guess],
                               [1.5*guess for guess in std_guess]]    
@@ -503,7 +503,7 @@ class PhotonCalibration:
                                                 npeaks = npeaks)
             fig, ax = plt.subplots()
             ax.set_title("Initial State")
-            ax.step(spectrum_bin_edges[:-1], spectrum_vals, label='Values')
+            ax.step(spectrum_bin_edges[:-1], spectrum_vals, where='post', label='Values')
             ax.plot(plot_bins, modeled_vals, label = "Guessed Model")
             if lgc_ylog:
                 ax.set_ylim(1e-1, 1.25*max(spectrum_vals))
@@ -559,7 +559,7 @@ class PhotonCalibration:
             
             
             plt.title("Final State")
-            plt.step(spectrum_bin_edges[:-1], spectrum_vals, label='Values')
+            plt.step(spectrum_bin_edges[:-1], spectrum_vals, where='post', label='Values')
             plt.plot(plot_bins, modeled_vals, label = "Fit Model")
             if lgc_ylog:
                 plt.ylim(1e-1, 1.25*max(spectrum_vals))
