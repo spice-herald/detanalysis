@@ -277,10 +277,13 @@ class Vibration_Analyzer(Analyzer):
             )
 
         if verbose:
-            print(
-                f"Total events available: {total_events}; processing "
-                f"{n_kept_events} after downsampling (factor {downsample_factor})."
-            )
+            if downsample_factor == 1:
+                print(f"Processing {total_events} events.")
+            else:
+                print(
+                    f"Total events available: {total_events}; processing "
+                    f"{n_kept_events} after downsampling (factor {downsample_factor})."
+                )
 
         # Set up H5Reader for event streaming
         h5reader = h5io.H5Reader()
@@ -1575,7 +1578,7 @@ class Vibration_Analyzer(Analyzer):
         self,
         channels=None,
         figsize=(14, 6),
-        show_variance=True,
+        show_err=True,
         colors=None,
         show_spectral_noise=True,
         spectral_noise_color='tab:red',
@@ -1596,7 +1599,7 @@ class Vibration_Analyzer(Analyzer):
             If None, all currently cached channels are plotted.
         figsize : tuple of (float, float), optional
             Figure size passed to plt.subplots. Default: (14, 6).
-        show_variance : bool, optional
+        show_err : bool, optional
             If True, draw the ±1-sigma uncertainty band around each
             channel's PSD. Default: True.
         colors : dict of {str: str}, optional
@@ -1621,6 +1624,14 @@ class Vibration_Analyzer(Analyzer):
         fig : matplotlib.figure.Figure
         ax  : matplotlib.axes.Axes
         """
+        # Reject a bare string early: iterating it would split into characters
+        # and produce a confusing downstream error about invalid channels
+        if isinstance(channels, str):
+            raise TypeError(
+                f"channels must be array-like (e.g. a list of str), not a single "
+                f"string. Did you mean channels=['{channels}']?"
+            )
+
         # Resolve which channels to plot
         if channels is None:
             if self._channels is None:
@@ -1674,7 +1685,7 @@ class Vibration_Analyzer(Analyzer):
             )
 
             # Optionally draw the ±1-sigma uncertainty band
-            if show_variance:
+            if show_err:
                 # Build 1-sigma bounds; keep lower bound positive for log-scale plotting
                 lower = np.maximum(amp - sigma, np.finfo(float).tiny)
                 upper = amp + sigma
