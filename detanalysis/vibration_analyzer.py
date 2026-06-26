@@ -1,7 +1,4 @@
-"""
-vibration_analyzer.py
-Inherits detanalysis.Analyzer with vibration-specific PSD and transfer function methods.
-"""
+### The Vibration Analyzer inherits detanalysis.Analyzer, and adds vibration-specific PSD and transfer function calculation and visualization methods.
 
 import warnings
 
@@ -14,56 +11,72 @@ import pytesdaq.io as h5io
 from detanalysis import Analyzer
 
 
+def _count_downsampled_events(total_events, downsample_factor):
+    """
+    Number of events kept by the downsampling stride.
+
+    The stride keeps the first event, then every downsample_factor-th event
+    after it (1-based indices 1, 1 + downsample_factor,
+    1 + 2 * downsample_factor, ...). A non-empty stream therefore always
+    keeps at least the first event.
+
+    Parameters
+    ----------
+    total_events : int
+        Total number of events available in the raw stream.
+    downsample_factor : int
+        Stride; 1 keeps every event.
+
+    Return
+    ------
+    n_kept : int
+        Number of events the stride will process.
+    """
+    if total_events < 1:
+        return 0
+    return (total_events - 1) // downsample_factor + 1
+
+
 class Vibration_Analyzer(Analyzer):
     """
     Inherits detanalysis.Analyzer, adds vibration-specific analysis methods
     for accelerometer data stored in processed HDF5 files.
+    Acquire processed data from the process_transducer_sweep.py script in detprocess.
 
-    Inherits all Analyzer capabilities (vaex DataFrame access, cut management,
-    histogram/scatter plotting, etc.) and adds:
-      - get_psd()                       : compute PSDs and uncertainties per channel
-      - get_transfer_function()         : compute transfer functions via up to three
-                                          estimators (mean_ratio, cross_correlation,
-                                          phase_locked) for multiple channel pairs
-      - plot_psd()                      : plot PSD for one or more channels
-      - plot_transfer_function()        : plot transfer function magnitude
-      - plot_transfer_function_phase()  : plot transfer function phase (complex
-                                          methods only)
+    Adds the following methods to the base Analyzer class:
+        - get_psd()                       : compute PSDs and err.
+                                            PSDs computed by get_psd() are cached for reuse by plot_psd().
+        - get_transfer_function()         : compute transfer functions from accelerometer data
+                                            Supports estimators mean_ratio, cross_correlation, and phase_locked.
+                                            Transfer functions are cached for reuse by plotting methods.
+        - plot_psd()                      : plot PSD for one or more channels
+        - plot_transfer_function()        : plot transfer function magnitude
+        - plot_transfer_function_phase()  : plot transfer function phase (complex methods only, mean_ratio not supported)
 
-    Transfer function estimators operate on per-trace complex amplitudes
-    z = A + iB (from sinusoidal fits at each drive frequency):
-      - mean_ratio:        |mean(z_out)| / |mean(z_in)|   (real, amplitude only)
-      - cross_correlation: mean(z_out * conj(z_in)) / mean(|z_in|^2)  (complex)
-      - phase_locked:      mean(z_out) / mean(z_in)       (complex, unbiased)
-
-    PSDs computed by get_psd() are cached internally for reuse by plot_psd().
-    Transfer functions are cached per-method for reuse by plotting methods.
     """
 
-    # Valid transfer function estimation methods.
+    # Valid transfer function estimator name strings.
     VALID_TF_METHODS = ('mean_ratio', 'cross_correlation', 'phase_locked')
 
-    # Default number of log-spaced points used by plot_transfer_function /
-    # plot_psd when log_downsample=True. Chosen to stay well below matplotlib
-    # Agg's cell block limit while preserving visual fidelity on a log x-axis.
+    # Default number of log-spaced points used by plotting functions when log_downsample=True. 
+    # (otherwise matplotlib will sometimes produce "cell block limit exceeded" error if too much data is plotted at once)
     _LOG_DOWNSAMPLE_DEFAULT_POINTS = 20000
 
-    # Intrinsic accelerometer noise floor (from accelerometer spec sheet).
-    # Piecewise-constant: value at index k applies from FREQS_HZ[k] to FREQS_HZ[k+1].
+    # Intrinsic accelerometer noise floor.
+    # Calculated from Model 393B04 Seismic Accelerometer, PCB Piezotronics, Inc. (https://www.pcb.com/products?m=393b04).
+    # value at index k applies from FREQS_HZ[k] to FREQS_HZ[k+1].
     _NOISE_FLOOR_FREQS_HZ      = np.array([0.1, 10.0, 100.0, 1000.0])
     _NOISE_FLOOR_G_PER_SQRT_HZ = np.array([0.30, 0.10, 0.04, 0.04]) * 1e-6
 
     def __init__(self, paths, series=None, **kwargs):
         """
-        Initialize Vibration_Analyzer.
-
         Parameters
         ----------
         paths : str or list
-            Path(s) to processed amplitude HDF5 file(s), passed directly to
-            Analyzer.__init__.
+            Path(s) to processed amplitude HDF5 file(s), passed directly to Analyzer.__init__() base class initializer.
         series : str or list, optional
             Filter files by series name. Default: all files in paths.
+            Formatted like 'I2_D20260622_T221904' (without the prefix 'cont_', 'amp_', etc; and without the dump number F00001...)
         **kwargs
             Additional keyword arguments forwarded to Analyzer.__init__
             (e.g. analysis_repo, use_vaex_cut_handling, memory_cache_size).
@@ -87,9 +100,9 @@ class Vibration_Analyzer(Analyzer):
         """
         Construct a Vibration_Analyzer from raw continuous noise HDF5 data.
 
-        Reads raw accelerometer traces, computes broadband PSDs via Welford's
-        online algorithm, and derives transfer functions via two methods:
-        mean-PSD-ratio and cross-correlation.
+        Reads raw accelerometer traces, computes broadband PSDs, and derives
+        transfer functions via two methods: mean-PSD-ratio and
+        cross-correlation.
 
         Parameters
         ----------
@@ -164,6 +177,14 @@ class Vibration_Analyzer(Analyzer):
                 )
             trace_length_msec = float(trace_length_msec)
 
+        # Validate downsample_factor (process every Nth event; 1 keeps all)
+        if (not isinstance(downsample_factor, (int, np.integer))) or (downsample_factor < 1):
+            raise ValueError(
+                "downsample_factor must be a positive integer >= 1; "
+                f"got {downsample_factor!r}."
+            )
+        downsample_factor = int(downsample_factor)
+
         # Normalize channel_pairs format
         if channel_pairs is not None and channel_pairs and isinstance(channel_pairs[0], str):
             channel_pairs = [channel_pairs]
@@ -192,8 +213,11 @@ class Vibration_Analyzer(Analyzer):
         # Load metadata via detprocess.RawData
         rawdata = detprocess.RawData(raw_path, data_type='cont', verbose=verbose)
         sample_rate = rawdata.get_sample_rate(data_type='cont')
+        # Count events for the selected series only (matches the H5Reader's
+        # series filtering below), so total_events and the progress bar reflect
+        # what is actually read rather than the whole dataset.
         duration, total_events = rawdata.get_duration(
-            data_type='cont', include_nb_events=True,
+            series=series, data_type='cont', include_nb_events=True,
         )
         total_events = int(total_events)
 
@@ -218,13 +242,53 @@ class Vibration_Analyzer(Analyzer):
                     "FFT performance may be suboptimal."
                 )
 
+        # Fail fast if the downsampling stride keeps too few events to proceed.
+        # total_events is already known, so we can raise a clear error here
+        # instead of reading the entire dataset only to fail at the end.
+        n_kept_events = _count_downsampled_events(total_events, downsample_factor)
+
+        # The default path produces one trace per kept event and needs >= 2 for
+        # variance estimation. The rechunk path can yield many chunks from a
+        # single long event, so it only requires >= 1 kept event here (the >= 2
+        # chunk requirement is enforced after the loop).
+        if trace_length_samples is None:
+            min_kept_required = 2
+        else:
+            min_kept_required = 1
+
+        if n_kept_events < min_kept_required:
+            raise ValueError(
+                f"downsample_factor={downsample_factor} keeps only "
+                f"{n_kept_events} of {total_events} event(s); need at least "
+                f"{min_kept_required}. Reduce downsample_factor to at most "
+                f"{max(total_events - 1, 1)}."
+            )
+
+        # Downsampling does not skip disk reads (every event is still read
+        # before being kept or discarded), so a factor at/above the total event
+        # count keeps only the first event yet still reads the whole dataset.
+        if downsample_factor >= total_events:
+            warnings.warn(
+                f"downsample_factor={downsample_factor} is >= the total number "
+                f"of events ({total_events}); only the first event is "
+                "processed. Downsampling does not skip disk reads, so every "
+                "event is still read from disk. Consider a smaller "
+                "downsample_factor or a series filter."
+            )
+
+        if verbose:
+            print(
+                f"Total events available: {total_events}; processing "
+                f"{n_kept_events} after downsampling (factor {downsample_factor})."
+            )
+
         # Set up H5Reader for event streaming
         h5reader = h5io.H5Reader()
         h5reader.set_files(raw_path, series=series)
 
         n_channels = len(channels)
 
-        # Welford accumulators — will be initialized on first event (need n_freqs)
+        # PSD accumulators — will be initialized on first event (need n_freqs)
         welford_mean = None   # running mean of PSD (g/sqrt(Hz)), shape (n_channels, n_freqs)
         welford_m2 = None     # running M2 for variance, shape (n_channels, n_freqs)
 
@@ -260,7 +324,7 @@ class Vibration_Analyzer(Analyzer):
             # when rechunking is enabled)
             n_samples = trace_2d.shape[-1]
 
-            # First-trace initialization: frequency axis, Welford accumulators,
+            # First-trace initialization: frequency axis, PSD accumulators,
             # and (optionally) cross-correlation accumulators
             if welford_mean is None:
                 n_freqs_local = n_samples // 2 + 1
@@ -274,7 +338,7 @@ class Vibration_Analyzer(Analyzer):
                         sum_cross[key] = np.zeros(n_freqs_local, dtype=complex)
                         sum_auto[key] = np.zeros(n_freqs_local)
 
-            # Bump trace counter (used by Welford running mean/variance below)
+            # Bump trace counter (used by the running mean/variance below)
             n_events_processed = n_events_processed + 1
 
             # Compute FFT and one-sided PSD for each channel
@@ -296,7 +360,7 @@ class Vibration_Analyzer(Analyzer):
                 # PSD in g/sqrt(Hz) (square root of power spectral density)
                 psd_val = np.sqrt(psd_two_sided)
 
-                # Welford online update for running mean and variance of PSD (g/sqrt(Hz))
+                # Update the running mean and variance of the PSD (g/sqrt(Hz))
                 delta = psd_val - welford_mean[ch_idx]
                 welford_mean[ch_idx] = welford_mean[ch_idx] + delta / n_events_processed
                 delta2 = psd_val - welford_mean[ch_idx]
@@ -340,8 +404,10 @@ class Vibration_Analyzer(Analyzer):
             pbar.update(1)
             event_index = event_index + 1
 
-            # Downsample: skip events that don't match the stride
-            if event_index % downsample_factor != 0:
+            # Downsample: keep the first event, then every downsample_factor-th
+            # event after it. This matches _count_downsampled_events and ensures
+            # a non-empty stream always keeps at least the first event.
+            if (event_index - 1) % downsample_factor != 0:
                 continue
 
             # Convert ADC amplitude to g (event shape: (n_channels, n_samples))
@@ -1327,6 +1393,7 @@ class Vibration_Analyzer(Analyzer):
             ax.set_ylabel("Attenuation")
 
         ax.grid(True, which="both", ls=":")
+        ax.tick_params(direction='in')
         ax.legend()
 
         # Secondary right-hand axis in dB, with ticks synced to the left axis
@@ -1510,9 +1577,12 @@ class Vibration_Analyzer(Analyzer):
         figsize=(14, 6),
         show_variance=True,
         colors=None,
+        show_spectral_noise=True,
+        spectral_noise_color='tab:red',
+        spectral_noise_dict=None,
     ):
         """
-        Plot the ASD for one or more channels with 1-sigma uncertainty bands and the
+        Plot the PSD for one or more channels with 1-sigma uncertainty bands and the
         intrinsic accelerometer noise floor.
 
         Uses internally cached PSDs from a prior get_psd() call when available.
@@ -1532,6 +1602,19 @@ class Vibration_Analyzer(Analyzer):
         colors : dict of {str: str}, optional
             Mapping from channel name to matplotlib color. Channels not in
             the mapping fall back to the default property cycle.
+        show_spectral_noise : bool, optional
+            If True, draw the intrinsic accelerometer noise floor as a
+            piecewise-constant horizontal line. Default: True.
+        spectral_noise_color : str, optional
+            Color for the intrinsic noise floor line. Default: 'tab:red'.
+        spectral_noise_dict : dict, optional
+            Optional dictionary specifying the noise floor to plot. If None,
+            the default noise floor for the PCB Piezotronics Model 393B04 is used.
+            If provided, it must contain:
+              'freqs_hz' : list or np.array of float
+                  Frequencies (Hz) at which the noise floor is defined.
+              'noise_floor_g_per_sqrt_hz' : list or np.array of float
+                  Noise floor values (g/√Hz) corresponding to the frequencies.
 
         Returns
         -------
@@ -1608,27 +1691,43 @@ class Vibration_Analyzer(Analyzer):
                 )
 
         # Plot intrinsic noise floor as piecewise-constant horizontal segments
-        for k in range(len(self._NOISE_FLOOR_FREQS_HZ)):
-            f_start = self._NOISE_FLOOR_FREQS_HZ[k]
-            f_end   = (
-                self._NOISE_FLOOR_FREQS_HZ[k + 1]
-                if k < len(self._NOISE_FLOOR_FREQS_HZ) - 1
-                else freq_end
-            )
-            ax.hlines(
-                self._NOISE_FLOOR_G_PER_SQRT_HZ[k],
-                f_start,
-                f_end,
-                colors="red",
-                linestyles="dashdot",
-                alpha=0.5,
-                label="Intrinsic Spectral Noise" if k == 0 else None,
-            )
+        if show_spectral_noise:
+            # Resolve the noise floor to draw: caller-supplied dict or class default
+            if spectral_noise_dict is not None:
+                noise_freqs  = np.asarray(spectral_noise_dict['freqs_hz'])
+                noise_values = np.asarray(spectral_noise_dict['noise_floor_g_per_sqrt_hz'])
+            else:
+                noise_freqs  = self._NOISE_FLOOR_FREQS_HZ
+                noise_values = self._NOISE_FLOOR_G_PER_SQRT_HZ
+
+            for k in range(len(noise_freqs)):
+                f_start = noise_freqs[k]
+                if k < len(noise_freqs) - 1:
+                    f_end = noise_freqs[k + 1]
+                else:
+                    f_end = freq_end
+
+                # Label only the first segment so the legend has a single entry
+                if k == 0:
+                    segment_label = "Intrinsic Spectral Noise"
+                else:
+                    segment_label = None
+
+                ax.hlines(
+                    noise_values[k],
+                    f_start,
+                    f_end,
+                    colors=spectral_noise_color,
+                    linestyles="dashdot",
+                    alpha=0.5,
+                    label=segment_label,
+                )
 
         ax.set_xlim(np.nanmin(freqs), freq_end)
         ax.set_xlabel("Frequency (Hz)")
         ax.set_ylabel(r"Transducer Freq (g/$\sqrt{\mathrm{Hz}}$)")
         ax.grid(True, which="both", ls="--", alpha=0.3)
+        ax.tick_params(direction='in')
         ax.legend()
         ax.set_ylim([min_amp*0.8, max_amp*1.2])
 
