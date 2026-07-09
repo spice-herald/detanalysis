@@ -87,6 +87,7 @@ dmypy.json
 .DS_Store
 Thumbs.db
 
-# Claude
+# Agents
+AGENTS.md
 CLAUDE.md
 .claude/
