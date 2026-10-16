@@ -1,4 +1,5 @@
 import math
+import numbers
 import os
 import uuid
 import importlib
@@ -576,6 +577,63 @@ class Analyzer:
     # Plotting
     # ------------------------------------------------------------------
 
+    # vaex computes min/max with a compiled kernel that rejects a data chunk
+    # holding no selected rows ("stride is not equal to 1"). A cut selecting
+    # nothing from one of the loaded files therefore breaks the plot, even
+    # though the cut is perfectly valid. Only the automatic limit search is
+    # affected: binning with explicit limits works, so limits are recomputed
+    # with numpy when vaex gives up.
+    _VAEX_SPARSE_SELECTION_ERROR = "stride is not equal to 1"
+
+    @staticmethod
+    def _explicit_limits(limits):
+        """True when limits are already a concrete [low, high] pair."""
+        return (isinstance(limits, (list, tuple, np.ndarray))
+                and len(limits) == 2
+                and all(isinstance(value, numbers.Number) for value in limits))
+
+    def _safe_limits(self, df, expression, limits):
+        """Resolve plot limits for a possibly sparse or empty selection.
+
+        ``limits`` accepts what vaex accepts: a concrete ``[low, high]``,
+        ``"minmax"``, or a percentage such as ``"99.7%"``. Returns concrete
+        limits, or None when the selection holds no finite value and there is
+        nothing to plot.
+        """
+        if self._explicit_limits(limits):
+            return limits
+
+        try:
+            return df.limits(expression, limits)
+        except (ValueError, RuntimeError) as error:
+            if self._VAEX_SPARSE_SELECTION_ERROR not in str(error):
+                raise
+
+        values = np.asarray(df.evaluate(expression), dtype=float)
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            return None
+
+        percentage = None
+        if isinstance(limits, str) and limits.endswith("%"):
+            percentage = float(limits[:-1])
+        elif isinstance(limits, numbers.Number):
+            percentage = float(limits)
+
+        if percentage is None:
+            low, high = float(values.min()), float(values.max())
+        else:
+            # vaex centers a percentage interval on the median
+            tail = (100.0 - percentage) / 2.0
+            low, high = (float(value) for value in
+                         np.percentile(values, [tail, 100.0 - tail]))
+
+        if low == high:
+            # vaex needs a non-empty interval to build bin edges
+            pad = abs(low) * 1e-6 or 1e-6
+            low, high = low - pad, high + pad
+        return [low, high]
+
     def hist(
         self,
         feature_x,
@@ -636,10 +694,15 @@ class Analyzer:
             label = labels[icut] if labels is not None else None
             kwargs["color"] = colors[icut]
             df_used = self._subset_df(self._df, cut=cut)
+            cut_limits = self._safe_limits(df_used, feature_x, limits)
+            if cut_limits is None:
+                print(f'WARNING: no event passes cut "{cut}", nothing to '
+                      f'histogram for "{label or cut}".')
+                continue
             df_used.viz.histogram(
                 feature_x,
                 shape=shape,
-                limits=limits,
+                limits=cut_limits,
                 n=normalize,
                 xlabel=xlabel,
                 ylabel=ylabel,
@@ -660,6 +723,18 @@ class Analyzer:
             ax.set_title(title)
 
         return fig, ax
+
+    def _split_2d_limits(self, limits):
+        """Split a heatmap ``limits`` argument into per-axis specifications.
+
+        Mirrors vaex: a single concrete pair or a named specification applies
+        to both axes, while a two-element sequence gives one specification per
+        axis (either of which may itself be named or missing).
+        """
+        if (limits is None or isinstance(limits, str)
+                or self._explicit_limits(limits)):
+            return limits, limits
+        return limits[0], limits[1]
 
     def heatmap(
         self,
@@ -692,13 +767,20 @@ class Analyzer:
             limits = [xlimits, ylimits]
 
         df_used = self._subset_df(self._df, cut=cut)
+        xspec, yspec = self._split_2d_limits(limits)
+        xlim = self._safe_limits(df_used, feature_x, xspec)
+        ylim = self._safe_limits(df_used, feature_y, yspec)
+        if xlim is None or ylim is None:
+            print(f'WARNING: no event passes cut "{cut}", nothing to plot.')
+            return fig, ax
+
         df_used.viz.heatmap(
             feature_x,
             feature_y,
             colormap=colormap,
             shape=shape,
             f=f,
-            limits=limits,
+            limits=[xlim, ylim],
             figsize=figsize,
             xlabel=xlabel,
             ylabel=ylabel,
