@@ -7,7 +7,6 @@ from matplotlib.colors import LogNorm
 import vaex as vx
 from glob import glob
 import os
-import pytesio as h5io
 import math
 from pprint import pprint
 import importlib
@@ -17,12 +16,13 @@ import qetpy as qp
 import git
 from tabulate import tabulate
 
+from .analyzer import read_traces, records_from_dataframe
+
 __all__ = ['Semiautocut', 'MasterSemiautocut', 'get_trace']
 
-h5 = h5io.H5Reader()
-
-def get_trace(df, index, path_to_data, lgcdiagnostics=False, 
-              trace_length_msec=10, pretrigger_length_msec=5):
+def get_trace(df, index, path_to_data, lgcdiagnostics=False,
+              trace_length_msec=10, pretrigger_length_msec=5,
+              channels=None, units='amps'):
     """
     Function to retrieve a trace so it can be plotted.
 
@@ -33,40 +33,42 @@ def get_trace(df, index, path_to_data, lgcdiagnostics=False,
     index : int
         Row index in the current dataframe view.
     path_to_data : str
-        Path to the folder where the raw data is stored.
+        Path to the raw acquisition the events were processed from.
     lgcdiagnostics : bool, optional
         If True, prints diagnostic statements.
     trace_length_msec : float, optional
-        Total trace length, passed to read_many_events.
+        Total trace length, in milliseconds.
     pretrigger_length_msec : float, optional
-        Pretrigger length, passed to read_many_events.
+        Pretrigger length, in milliseconds.
+    channels : str or list of str, optional
+        Detector channel name(s). If None, all channels are read, which
+        fails for a channel that cannot be converted to `units` (a TTL
+        channel has no close loop norm, for instance).
+    units : str, optional
+        "adc", "volts", "amps" (default) or "g".
+
+    Returns
+    -------
+    trace : ndarray[channel, sample]
+        Trace of the selected event.
     """
     if index < 0 or index >= len(df):
         raise IndexError(f"index {index} out of range for dataframe of length {len(df)}")
 
-    group_name = df.group_name.values[index]
-    event_number = int(df.event_number.values[index])
-    series_number = int(df.series_number.values[index])
-    dump_number = int(df.dump_number.values[index])
+    record_list = records_from_dataframe(df[index:index + 1])
 
     if lgcdiagnostics:
-        print("group_name: " + str(group_name))
-        print("event_number: " + str(event_number))
-        print("series_number: " + str(series_number))
-        print("dump_number: " + str(dump_number))
+        print("record: " + str(record_list[0]))
 
-    event_nums_ = [int(dump_number * 100000 + event_number)]
-    series_nums_ = [int(series_number)]
-
-    trace = h5.read_many_events(
-        filepath=path_to_data,
-        nevents=1,
-        event_nums=event_nums_,
-        series_nums=series_nums_,
+    traces, _ = read_traces(
+        path_to_data,
+        record_list,
+        channels=channels,
         trace_length_msec=trace_length_msec,
         pretrigger_length_msec=pretrigger_length_msec,
+        units=units,
     )
-    return np.asarray(trace)
+    return traces[0]
 
 
 class Semiautocut:
@@ -1726,7 +1728,8 @@ class Semiautocut:
         plt.show()
             
     def plot_example_events(self, num_example_events, trace_index, path_to_triggered_data,
-                             time_lims=None, lp_freq=None, lgcdiagnostics=False):
+                             time_lims=None, lp_freq=None, channels=None,
+                             lgcdiagnostics=False):
         """
         Plots a certain number of example of events that pass and
         fail cuts.
@@ -1748,6 +1751,12 @@ class Semiautocut:
             
         lp_freq : float, optional
             Cutoff frequency for an optional trace low pass filter
+            
+        channels : str or list of str, optional
+            Detector channel name(s) to read. If None, all channels are read,
+            which fails for a channel that cannot be converted to amps (a TTL
+            channel, for instance). "trace_index" selects within the channels
+            that were read.
             
         lgcdiagnostics : bool, optional
             If True, prints our diagnostic statements
@@ -1782,8 +1791,10 @@ class Semiautocut:
         i = 0
         while i < len(pass_indicies):
             traces_passing.append(get_trace(self.df, pass_indicies[i], path_to_triggered_data,
+                                  channels=channels,
                                   lgcdiagnostics=lgcdiagnostics)[trace_index])
             traces_failing.append(get_trace(self.df, fail_indicies[i], path_to_triggered_data, 
+                                  channels=channels,
                                   lgcdiagnostics=lgcdiagnostics)[trace_index])
             i += 1
             
@@ -2265,7 +2276,8 @@ class MasterSemiautocuts:
         plt.show()    
         
     def plot_example_events(self, num_example_events, trace_index, path_to_triggered_data,
-                             time_lims=None, lp_freq=None, lgcdiagnostics=False):
+                             time_lims=None, lp_freq=None, channels=None,
+                             lgcdiagnostics=False):
         """
         Plots a certain number of example of events that pass and
         fail cuts.
@@ -2287,6 +2299,12 @@ class MasterSemiautocuts:
             
         lp_freq : float, optional
             Cutoff frequency for an optional trace low pass filter
+            
+        channels : str or list of str, optional
+            Detector channel name(s) to read. If None, all channels are read,
+            which fails for a channel that cannot be converted to amps (a TTL
+            channel, for instance). "trace_index" selects within the channels
+            that were read.
             
         lgcdiagnostics : bool, optional
             If True, prints our diagnostic statements
@@ -2317,8 +2335,10 @@ class MasterSemiautocuts:
         i = 0
         while i < len(pass_indicies):
             traces_passing.append(get_trace(self.df, pass_indicies[i], path_to_triggered_data,
+                                  channels=channels,
                                   lgcdiagnostics=lgcdiagnostics)[trace_index])
             traces_failing.append(get_trace(self.df, fail_indicies[i], path_to_triggered_data, 
+                                  channels=channels,
                                   lgcdiagnostics=lgcdiagnostics)[trace_index])
             i += 1
             
@@ -2412,7 +2432,7 @@ class MasterSemiautocuts:
         plt.show()
         
     def get_example_events(self, num_example_events, trace_index, path_to_triggered_data,
-                           lgcdiagnostics=False):
+                           channels=None, lgcdiagnostics=False):
         """
         Returns a set number of traces that pass cuts, for e.g. comparison to autocuts.
         
@@ -2427,13 +2447,19 @@ class MasterSemiautocuts:
             
         path_to_triggered_data : str
             Path to the folder holding triggered data
-            
+
+        channels : str or list of str, optional
+            Detector channel name(s) to read. If None, all channels are read,
+            which fails for a channel that cannot be converted to amps (a TTL
+            channel, for instance). "trace_index" selects within the channels
+            that were read.
+
         lgcdiagnostics : bool, optional
             If True, prints our diagnostic statements
-            
+
         Returns
         -------
-        
+
         traces_passing : array
             Array of the traces passing all the cuts
         """
@@ -2459,6 +2485,7 @@ class MasterSemiautocuts:
         i = 0
         while i < len(pass_indicies):
             traces_passing.append(get_trace(self.df, pass_indicies[i], path_to_triggered_data,
+                                  channels=channels,
                                   lgcdiagnostics=lgcdiagnostics)[trace_index])
             if lgcdiagnostics:
                 if i%10 == 0:

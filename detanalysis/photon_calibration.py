@@ -5,7 +5,7 @@ from scipy.optimize import least_squares
 import matplotlib.pyplot as plt
 from tabulate import tabulate
 import copy
-import pytesio as h5io
+from pytesprocess import FilterH5IO
 from qetpy.core.didv._uncertainties_didv import get_dPdI_with_uncertainties
 from qetpy.core import calc_psd
 from qetpy.utils import make_template_twopole, make_template_threepole, make_template_fourpole, lowpassfilter
@@ -1314,7 +1314,7 @@ class PhotonCalibration:
 
         """
         if didv_result is None:
-            filter_io = h5io.FilterH5IO(self.filterfile_path)
+            filter_io = FilterH5IO(self.filterfile_path)
             didv_dataframe = filter_io.load()
             dpdi_vals_tag = f'dpdi_{self.npoles}poles_{self.dpdi_tag}'
             dpdi_errs_tag = f'dpdi_err_{self.npoles}poles_{self.dpdi_tag}'

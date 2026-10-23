@@ -11,13 +11,201 @@ import git
 import numpy as np
 import pandas as pd
 import qetpy as qp
-import pytesio as h5io
 import vaex as vx
 from git import GitCommandError
 from matplotlib import pyplot as plt
+from pytesdaqx.io import StreamReader
+from pytesprocess.utils.event_metadata import event_locator
 
 
-__all__ = ["Analyzer"]
+__all__ = ["Analyzer", "records_from_dataframe", "read_traces"]
+
+
+# Dataframe columns that locate an event in the raw data. "storage_format"
+# selects the coordinate vocabulary: HDF5 uses global_segment_number +
+# segment_trigger_*, continuous Zarr uses stream_trigger_* or
+# partition_start_* + partition_trigger_*, finite Zarr uses trace_index.
+RECORD_COLUMNS = (
+    "storage_format",
+    "sample_rate_hz",
+    "stream_id",
+    "global_segment_number",
+    "segment_trigger_index",
+    "segment_trigger_time_s",
+    "stream_trigger_index",
+    "stream_trigger_time_s",
+    "partition_start_index",
+    "partition_start_time_s",
+    "partition_trigger_index",
+    "partition_trigger_time_s",
+    "partition_length_samples",
+    "trace_index",
+)
+
+
+def records_from_dataframe(df):
+    """
+    Build a pytesdaqx record list locating every row of `df` in the raw data.
+
+    Each record uses the canonical coordinates of the raw storage format the
+    event came from, so a dataframe mixing HDF5 and Zarr acquisitions is
+    handled row by row. "stream_id" is always included: without it pytesdaqx
+    cannot tell apart streams that share a dump number.
+
+    Parameters
+    ----------
+    df : vaex dataframe
+        Dataframe processed with pytesprocess. Every row is located.
+
+    Returns
+    -------
+    record_list : list of dict
+        Record locators, in dataframe row order.
+    """
+    column_names = df.get_column_names()
+    available_columns = [name for name in RECORD_COLUMNS if name in column_names]
+
+    for required in ("storage_format", "sample_rate_hz", "stream_id"):
+        if required not in available_columns:
+            raise ValueError(
+                f'ERROR: Column "{required}" is missing from the dataframe. '
+                "Raw events can only be located in dataframes processed with "
+                "pytesprocess."
+            )
+
+    columns = {name: np.asarray(df.evaluate(name)) for name in available_columns}
+
+    record_list = []
+    for ievent in range(len(df)):
+        row = {name: values[ievent] for name, values in columns.items()}
+        storage_format = str(row["storage_format"])
+        sample_rate_hz = float(row["sample_rate_hz"])
+
+        trace_index = row.get("trace_index")
+        if (
+            storage_format == "zarr"
+            and row.get("stream_trigger_index") is None
+            and row.get("partition_trigger_index") is None
+            and trace_index is not None
+            and not pd.isna(trace_index)
+            and int(trace_index) >= 0
+        ):
+            # Finite (trace-shaped) Zarr stream: the stored trace is the
+            # whole record, selected by index rather than by a trigger.
+            record = {"trace_index": int(trace_index)}
+        else:
+            record, _ = event_locator(
+                row,
+                storage_format=storage_format,
+                sample_rate_hz=sample_rate_hz,
+            )
+
+        record["stream_id"] = str(row["stream_id"])
+        record_list.append(record)
+
+    return record_list
+
+
+def read_traces(
+    raw_path,
+    record_list,
+    channels=None,
+    trace_length_msec=None,
+    pretrigger_length_msec=None,
+    units="amps",
+    stack=True,
+    baselinesub=False,
+    baselineinds=(5, 100),
+):
+    """
+    Read the events in `record_list` from the raw data at `raw_path`.
+
+    Parameters
+    ----------
+    raw_path : str
+        Raw acquisition directory/store, or a list of raw resources.
+
+    record_list : list of dict
+        Record locators, as built by `records_from_dataframe`.
+
+    channels : str or list of str, optional
+        Detector channel name(s). If None, all channels are read.
+
+    trace_length_msec, pretrigger_length_msec : float, optional
+        Trace and pretrigger lengths in milliseconds. Not accepted for
+        finite (trace-shaped) Zarr streams, where the stored trace is the
+        complete record.
+
+    units : str, optional
+        "adc", "volts", "amps" (default) or "g".
+
+    stack : bool, optional
+        If True, return a 3D ndarray[event, channel, sample]. If False,
+        return a list of 2D ndarray[channel, sample].
+
+    baselinesub : bool, optional
+        Subtract a per-trace baseline averaged over `baselineinds`.
+
+    baselineinds : tuple (int, int), optional
+        Start/stop sample of the baseline calculation.
+
+    Returns
+    -------
+    traces : ndarray or list of ndarray
+    info : list of dict
+        Record metadata, one entry per event.
+    """
+    read_kwargs = {}
+    if trace_length_msec is not None:
+        read_kwargs["trace_duration_s"] = trace_length_msec / 1000
+    if pretrigger_length_msec is not None:
+        read_kwargs["pretrigger_duration_s"] = pretrigger_length_msec / 1000
+
+    if read_kwargs and all("trace_index" in rec for rec in record_list):
+        raise ValueError(
+            "ERROR: Unable to truncate traces from a finite Zarr stream. "
+            'Leave "trace_length_msec"/"pretrigger_length_msec" unset to read '
+            "the complete stored records."
+        )
+
+    # Restricted data is selected explicitly: the dataframe already
+    # identifies which events the user is allowed to look at.
+    with StreamReader(raw_path, record_list=record_list, restricted="all") as reader:
+        traces, info = reader.read_records(
+            record_list,
+            channels=channels,
+            units=units,
+            stack=stack,
+            include_metadata=True,
+            **read_kwargs,
+        )
+
+    if baselinesub:
+        if stack:
+            traces = _subtract_baseline(traces, baselineinds)
+        else:
+            traces = [_subtract_baseline(trace, baselineinds) for trace in traces]
+
+    return traces, info
+
+
+def _subtract_baseline(traces, baselineinds):
+    """
+    Subtract a per-trace baseline, averaged over `baselineinds`.
+
+    Done here rather than in the reader: the continuous Zarr read path does
+    not accept baseline subtraction, so this keeps the result independent of
+    the raw storage format.
+    """
+    start, stop = int(baselineinds[0]), int(baselineinds[1])
+
+    if stop <= start or stop > traces.shape[-1]:
+        raise ValueError(
+            f"ERROR: Invalid baselineinds={baselineinds} for traces of "
+            f"length {traces.shape[-1]}!"
+        )
+
+    return traces - np.mean(traces[..., start:stop], axis=-1, keepdims=True)
 
 
 class Analyzer:
@@ -917,9 +1105,7 @@ class Analyzer:
         raw_path,
         cut=None,
         trace_length_msec=None,
-        trace_length_samples=None,
         pretrigger_length_msec=None,
-        pretrigger_length_samples=None,
         nb_random_samples=None,
         figsize=None,
         colors=None,
@@ -938,9 +1124,7 @@ class Analyzer:
         traces, info = self.get_traces(
             channels,
             trace_length_msec=trace_length_msec,
-            trace_length_samples=trace_length_samples,
             pretrigger_length_msec=pretrigger_length_msec,
-            pretrigger_length_samples=pretrigger_length_samples,
             raw_path=raw_path,
             cut=cut,
             nb_random_samples=nb_random_samples,
@@ -956,7 +1140,7 @@ class Analyzer:
         nrows = math.ceil(nb_events / 2)
         ncols = 1 if nb_events == 1 else 2
 
-        fs = info[0]["sample_rate"]
+        fs = info[0]["sample_rate_hz"]
         dt = 1 / fs
 
         if lpcutoff is not None:
@@ -1028,105 +1212,123 @@ class Analyzer:
 
         return fig, ax
 
-    def get_event_list(
+    def get_record_list(
         self,
         cut=None,
         nb_random_samples=None,
         nb_events_limit=5000,
     ):
+        """
+        Build a pytesdaqx record list locating the selected events in the
+        raw data.
+
+        Each record uses the canonical coordinates of the raw storage format
+        the event came from, so a dataframe mixing HDF5 and Zarr acquisitions
+        is handled row by row.
+        """
         df_used = self._subset_df(self._df, cut=cut)
 
-        if len(df_used) == 0:
+        nb_available = len(df_used)
+
+        if nb_available == 0:
             print("WARNING: No events found!")
             return None
 
         # limit the number of events
-        if  nb_random_samples is None:
+        if nb_random_samples is None:
             nb_random_samples = nb_events_limit
 
-        
-        if nb_random_samples is not None and nb_random_samples < len(df_used):
+        if nb_random_samples < nb_available:
             df_used = df_used.sample(n=nb_random_samples)
-
-        nb_events = len(df_used)
-
-        if nb_events > nb_random_samples:
-            print(f'WARNING: Number of events is limited to {nb_events_limit}. Change limit '
-                  f'or use  "nb_random_samples" if needed')
-            
-        if "eventnumber" in self._feature_names:
-            series_nums = df_used.seriesnumber.values
-            event_nums = df_used.eventnumber.values
-            group_names = None
-            trigger_indices = None
-        else:
-            series_nums = df_used.series_number.values
-            event_nums = df_used.event_number.values
-            group_names = (
-                df_used.group_name.values if "group_name" in self._feature_names else None
-            )
-            trigger_indices = (
-                df_used.trigger_index.values if "trigger_index" in self._feature_names else None
+            print(
+                f"WARNING: Number of events is limited to {nb_random_samples} "
+                f"(out of {nb_available}). Change limit or use "
+                f'"nb_random_samples" if needed'
             )
 
-        event_list = []
-        for ievent in range(nb_events):
-            event_dict = {}
-            if series_nums is not None:
-                event_dict["series_number"] = series_nums[ievent]
-            if event_nums is not None:
-                event_dict["event_number"] = event_nums[ievent]
-            if group_names is not None:
-                event_dict["group_name"] = group_names[ievent]
-            if trigger_indices is not None:
-                event_dict["trigger_index"] = trigger_indices[ievent]
-            event_list.append(event_dict)
+        record_list = records_from_dataframe(df_used)
 
-        print(f"INFO: Number of events found = {len(event_list)}")
-        return event_list
+        print(f"INFO: Number of events found = {len(record_list)}")
+        return record_list
 
     def get_traces(
         self,
         channels,
         raw_path,
         trace_length_msec=None,
-        trace_length_samples=None,
         pretrigger_length_msec=None,
-        pretrigger_length_samples=None,
         cut=None,
         nb_random_samples=None,
         nb_events_limit=1000,
+        units="amps",
         memory_limit=2,
         baselinesub=False,
         baselineinds=(5, 100),
     ):
-        event_list = self.get_event_list(
+        """
+        Read raw traces for the selected events.
+
+        Trace and pretrigger lengths are given in milliseconds. They are
+        ignored for finite (trace-shaped) Zarr streams, where the stored
+        trace is the complete record.
+        """
+        record_list = self.get_record_list(
             cut=cut,
             nb_random_samples=nb_random_samples,
             nb_events_limit=nb_events_limit,
         )
 
-        if event_list is None:
+        if record_list is None:
             return None, None
 
-        h5 = h5io.H5Reader()
-        traces, info = h5.read_many_events(
-            filepath=raw_path,
-            detector_chans=channels,
-            event_list=event_list,
+        self._check_traces_memory(
+            record_list,
+            channels,
             trace_length_msec=trace_length_msec,
-            trace_length_samples=trace_length_samples,
-            pretrigger_length_msec=pretrigger_length_msec,
-            pretrigger_length_samples=pretrigger_length_samples,
-            output_format=2,
-            include_metadata=True,
-            adctoamp=True,
             memory_limit=memory_limit,
+        )
+
+        return read_traces(
+            raw_path,
+            record_list,
+            channels=channels,
+            trace_length_msec=trace_length_msec,
+            pretrigger_length_msec=pretrigger_length_msec,
+            units=units,
             baselinesub=baselinesub,
             baselineinds=baselineinds,
         )
-        h5.clear()
-        return traces, info
+
+    def _check_traces_memory(
+        self,
+        record_list,
+        channels,
+        trace_length_msec=None,
+        memory_limit=2,
+    ):
+        """
+        Raise before reading if the stacked traces would exceed `memory_limit` GB.
+
+        The estimate assumes a single sample rate across the selection, which
+        is enough to catch a read that would exhaust memory.
+        """
+        if memory_limit is None or trace_length_msec is None:
+            return
+
+        nb_channels = 1 if isinstance(channels, str) else len(channels)
+        fs = float(np.asarray(self._df.evaluate("sample_rate_hz", 0, 1))[0])
+        nb_samples = round(trace_length_msec / 1000 * fs)
+
+        nb_bytes = len(record_list) * nb_channels * nb_samples * 8
+        nb_gb = nb_bytes / 1024**3
+
+        if nb_gb > memory_limit:
+            raise ValueError(
+                f"ERROR: Reading {len(record_list)} events x {nb_channels} channels "
+                f"x {nb_samples} samples needs about {nb_gb:.1f}GB, above the "
+                f'{memory_limit}GB limit. Lower "nb_events_limit" or raise '
+                '"memory_limit".'
+            )
 
     # ------------------------------------------------------------------
     # Internal info / file handling

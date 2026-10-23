@@ -4,15 +4,15 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as colors
 import matplotlib as mpl
 import vaex as vx
-from glob import glob
 import os
-import pytesio as h5io
 import math
 from pprint import pprint
 import importlib
 from inspect import getmembers, isfunction
 from copy import copy
 import qetpy as qp
+
+from .analyzer import read_traces, records_from_dataframe
 
 
 __all__ = ['ScatterPlotter']
@@ -27,7 +27,7 @@ class ScatterPlotter:
     def __init__(self, df, path_to_data, rq_1, rq_2,
                  label_1, label_2, title=None, 
                  trace_inds_to_plot=None, trace_inds_labels=None,
-                 selection=None):
+                 selection=None, channels=None):
         """
         Initialize the ScatterPlotter class.
         
@@ -75,6 +75,12 @@ class ScatterPlotter:
             
         selection : vaex selection string, optional
             Vaex selection string for the displayed data.
+            
+        channels : str or list of str, optional
+            Detector channel name(s) to read. If None, all channels are read,
+            which fails for a channel that cannot be converted to amps (a TTL
+            channel, for instance). "trace_inds_to_plot" selects within the
+            channels that were read.
         """
         #self.df = df
         self.path_to_data = path_to_data
@@ -91,6 +97,7 @@ class ScatterPlotter:
         
         self.trace_inds_to_plot = trace_inds_to_plot
         self.trace_inds_labels = trace_inds_labels
+        self.channels = channels
         
         self.selection = selection
         
@@ -121,85 +128,37 @@ class ScatterPlotter:
         index : int
             The index (in the vaex dataframe) of the trace being retrived
 
+        Returns
+        -------
+        trace : ndarray[channel, sample]
+            Trace of the selected event, in amps.
         """
 
-        
-        # instantiate h5reader
-        h5 = h5io.H5Reader()
-
-
-        # get list of columns
-        column_list = self.df.get_column_names()
-        
-        # series and dump number, and event number
-        dump_number = int(self.df[self.df.index==df_index].dump_number.values[0])
-        series_number = int(
-            self.df[self.df.index==df_index].series_number.values[0]
-        )
-        event_number = int(
-            self.df[self.df.index==df_index].event_number.values[0]
-        )
-        
-        # event index
-        event_index = None
-        if 'event_index' in  column_list:
-            event_index = int(self.df[self.df.index==df_index].event_index.values[0])
-        else:
-            event_index = event_number%100000
-            
-        # trigger index
-        trigger_index = None
-        if 'trigger_index' in column_list:
-            trigger_index = int(
-                self.df[self.df.index==df_index].trigger_index.values[0]
+        if trace_length_msec is None:
+            raise ValueError(
+                'ERROR: "trace_length_msec" is required. Events are located by '
+                'a trigger coordinate in the raw stream, so the window to read '
+                'around it has to be given.'
             )
-            
 
-        # file name
-        series_name = h5io.extract_series_name(series_number)
-        file_list = glob(self.path_to_data +'/*_' + series_name
-                         + '_F' + str(dump_number).zfill(4)
-                         + '.hdf5')
-        if len(file_list) != 1:
-            raise ValueError('ERROR: No raw data found')
-        file_name = file_list[0]
+        # locate the event in the raw data
+        df_event = self.df[self.df.index==df_index]
+        record_list = records_from_dataframe(df_event)
 
+        # get trace
+        traces, info = read_traces(
+            self.path_to_data,
+            record_list,
+            channels=self.channels,
+            trace_length_msec=trace_length_msec,
+            pretrigger_length_msec=pretrigger_length_msec,
+        )
 
         # sample rate (if None)
         if self.fs is None:
-            info =  h5.get_metadata(file_name=file_name)
-            adc_name = info['adc_list'][0]
-            self.fs = float(info['groups'][adc_name]['sample_rate'])
-                                
+            self.fs = float(info[0]['sample_rate_hz'])
 
-        # convert trace length to samples
-        nb_samples = None
-        nb_pretrigger_samples = None
-        if trace_length_msec is not None:
-            nb_samples = int(
-                round(trace_length_msec*self.fs*1e-3)
-            )
-            nb_pretrigger_samples = nb_samples//2
-
-        if pretrigger_length_msec is not None:
-            nb_pretrigger_samples = int(
-                round(pretrigger_length_msec*self.fs*1e-3)
-            )
-
-        if nb_samples is None:
-            trigger_index = None
-            
-    
-        # get trace
-        trace = h5.read_single_event(
-            event_index=event_index,
-            file_name=file_name,
-            trigger_index=trigger_index,
-            trace_length_samples=nb_samples,
-            pretrigger_length_samples=nb_pretrigger_samples,
-            adctoamp=True)
-        
-        return np.asarray(trace)
+        return traces[0]
     
         
     def plot_picking_scatter(self):
