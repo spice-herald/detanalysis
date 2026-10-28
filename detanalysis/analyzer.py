@@ -208,6 +208,41 @@ def _subtract_baseline(traces, baselineinds):
     return traces - np.mean(traces[..., start:stop], axis=-1, keepdims=True)
 
 
+def _patch_vaex_widgets():
+    """Restore the two APIs vaex 4.19 calls that its dependencies removed.
+
+    vaex-jupyter 0.9.0 is the last release, from 2023, and still calls:
+
+    * ``ipython.kernel.do_one_iteration()``, from ``vaex.jupyter.kernel_tick``,
+      which ipykernel dropped in 7.0 when the kernel became fully async. The
+      call sits in the grid progress callback, inside an ipywidgets ``Output``
+      that prints the traceback and swallows it, so the computation survives
+      but the progress bar sticks and every tick spams a traceback. There is
+      no synchronous way to pump one message on ipykernel 7, so the tick
+      becomes a no-op: frontend events reach the kernel after a computation
+      rather than during it, which is already the case today.
+
+    * ``matplotlib.cm.get_cmap``, removed in matplotlib 3.9, when it turns the
+      binned grid into the heatmap image. That one is fatal: the image comes
+      out empty and the widget shows bare axes.
+
+    Both are restored only when they are actually missing, so this is a no-op
+    on older dependencies and would become one again if vaex were ever fixed.
+    """
+    import matplotlib.cm
+    import vaex.jupyter
+    import vaex.jupyter.utils
+
+    if not hasattr(matplotlib.cm, "get_cmap"):
+        matplotlib.cm.get_cmap = plt.get_cmap
+
+    # vaex.jupyter.utils holds the definition, vaex.jupyter the name that
+    # view.py:63 actually calls; keep the two from disagreeing.
+    kernel = getattr(getattr(vaex.jupyter.utils, "ipython", None), "kernel", None)
+    if kernel is not None and not hasattr(kernel, "do_one_iteration"):
+        vaex.jupyter.utils.kernel_tick = vaex.jupyter.kernel_tick = lambda: None
+
+
 class Analyzer:
     """
     Analyze features (RQs) stored in HDF5 files using Vaex.
@@ -1077,6 +1112,7 @@ class Analyzer:
         Return Vaex interactive heatmap widget on the current working dataframe.
         If a global filter is active, selection is done only on the filtered view.
         """
+        _patch_vaex_widgets()
         return self._df.widget.heatmap(feature_x, feature_y, **kwargs)
 
     # ------------------------------------------------------------------
